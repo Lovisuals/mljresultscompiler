@@ -1,0 +1,57 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --terminal-bg: #0C0C0C;
+  --terminal-text: #CCCCCC;
+  --terminal-green: #0DBC79;
+  --terminal-blue: #3B78FF;
+  --terminal-yellow: #E5C07B;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--terminal-bg);
+  color: var(--terminal-text);
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+}
+
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+
+.cursor-blink {
+  animation: blink 1s infinite;
+}
+
+@keyframes typing {
+  from { width: 0; }
+  to { width: 100%; }
+}
+
+.typing-animation {
+  overflow: hidden;
+  white-space: nowrap;
+  animation: typing 0.5s steps(40, end);
+}
+
+/* Custom scrollbar for terminal */
+::-webkit-scrollbar {
+  width: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1a1a1a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3a3a3a;
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #4a4a4a;
+}
