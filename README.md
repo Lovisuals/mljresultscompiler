@@ -22,12 +22,6 @@ Then open: **http://localhost:3000**
 - 🎨 Professional dark theme
 - ✅ Automatic validation
 
-**Read More:**
-- [What's New](WHATS_NEW.md) - Overview of new features
-- [Quick Start](frontend/START_HERE.md) - 2-minute setup
-- [Complete Setup](FRONTEND_SETUP.md) - Detailed guide
-- [Interface Preview](frontend/INTERFACE_PREVIEW.md) - See the UI
-
 ---
 
 ## 🎯 What This System Does
@@ -344,9 +338,7 @@ test_results_collation_automation/
 │   └── run_automation_linux.sh        - Linux/Mac execution
 │
 ├── Documentation:
-│   ├── README.md                      - This file
-│   ├── SETUP_AND_CONFIGURATION.md     - Detailed setup guide
-│   └── ARCHITECTURE.md                - Technical architecture
+│   └── README.md                      - This file
 │
 └── Work Directories (created at runtime):
     ├── input/                         - Place test Excel files here
@@ -458,9 +450,3 @@ This system is provided for educational and organizational use. Feel free to:
 5. ✅ Check results in `output/` folder
 6. ✅ Review error logs and validation reports
 7. ✅ Archive results for your records
-
-**That's it!** Your monthly result processing is now automated. 🎉
-
----
-
-For detailed configuration and troubleshooting, see **SETUP_AND_CONFIGURATION.md**
