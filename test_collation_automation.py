@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
 Obstetrics & Gynecology Test Results Collation Automation
-Processes individual test result sheets and compiles into unified result sheet
-Designed for monthly automated processing with error tracking
+- Intelligent GRP DISCUSSION based on number of missed tests
+- Dynamic support for any number of tests
+- First attempt only for retakes
+- Intelligent column name discovery
+- Per-test color coding as requested
 """
 
 import pandas as pd
@@ -10,228 +13,304 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 import os
-from pathlib import Path
 from datetime import datetime
 import json
 import sys
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List, Optional
+
+# Fuzzy matching (recommended: pip install rapidfuzz)
+try:
+    from rapidfuzz import process, fuzz
+    FUZZY_LIB = "rapidfuzz"
+except ImportError:
+    try:
+        from thefuzz import process, fuzz
+        FUZZY_LIB = "thefuzz"
+    except ImportError:
+        FUZZY_LIB = None
+        print("[WARNING] No fuzzy library installed. Using basic keyword matching only.")
+
 
 class TestResultsCollator:
     def __init__(self, input_dir: str, output_dir: str, month_year: str):
         self.input_dir = input_dir
         self.output_dir = output_dir
         self.month_year = month_year
+        self.pass_mark = 50
+        self.fuzzy_threshold = 82
+
+        # YAML-style column configuration
+        self.column_config = {
+            "name": [
+                "FULL NAME", "FULL NAMES", "NAMES", "NAME", "STUDENT NAME",
+                "PARTICIPANT NAME", "FULL NAME (REQUIRED)", "NAME OF STUDENT",
+                "CANDIDATE NAME", "STUDENT FULL NAME"
+            ],
+            "email": [
+                "EMAIL", "EMAIL ADDRESS", "STUDENT EMAIL", "PARTICIPANT EMAIL",
+                "E-MAIL", "EMAIL ID"
+            ],
+            "result": [
+                "RESULT", "SCORE", "MARK", "TEST SCORE", "PERCENTAGE", "MARKS",
+                "RESULT (%)", "SCORE (%)", "FINAL MARK"
+            ]
+        }
+
+        # === Per-test color coding (as per your request) ===
+        self.test_colors = {
+            1: None,        # Test 1 - White / Default
+            2: "B0E0FF",    # Sky Blue
+            3: "FFFFE0",    # Yellow
+            4: "C6EFCE",    # Green
+            5: "FFCCCC",    # Soft Red
+            # 6 and above: None (neutral)
+        }
+
         self.error_log = {
-            'errors': [],
-            'warnings': [],
-            'processed_files': [],
+            'errors': [], 'warnings': [], 'processed_files': [],
             'timestamp': datetime.now().isoformat(),
             'skipped_test1_count': 0,
-            'retakes_handled': 0
+            'retakes_handled': 0,
+            'tests_found': [],
+            'column_mapping_issues': []
         }
-        self.pass_mark = 50
-        
+
+    def _fuzzy_match_column(self, df_columns: List[str], candidates: List[str], field: str) -> Optional[str]:
+        if not FUZZY_LIB:
+            return None
+        col_list = [str(col).strip().upper() for col in df_columns]
+        best_match = None
+        best_score = 0
+        for cand in candidates:
+            match = process.extractOne(cand.upper(), col_list, scorer=fuzz.token_sort_ratio)
+            if match and match[1] > best_score:
+                best_score = match[1]
+                best_match = df_columns[col_list.index(match[0])]
+        if best_match and best_score >= self.fuzzy_threshold:
+            return best_match
+        return None
+
     def discover_test_files(self) -> Dict[int, str]:
-        """Discover test files in input directory"""
         test_mapping = {}
-        patterns = {
-            1: ['TEST_1', 'test_1'],
-            2: ['TEST_2', 'test_2'],
-            3: ['TEST_3', 'test_3'],
-            4: ['TEST_4', 'test_4'],
-            5: ['TEST_5', 'test_5', 'Ultrasonography_Test_5']
-        }
-        
         for file in os.listdir(self.input_dir):
-            if not file.endswith('.xlsx'):
+            if not file.lower().endswith('.xlsx'):
                 continue
-            for test_num, pats in patterns.items():
-                if any(p in file for p in pats):
-                    test_mapping[test_num] = os.path.join(self.input_dir, file)
-                    self.error_log['processed_files'].append({'test': f'TEST_{test_num}', 'filename': file})
+            filepath = os.path.join(self.input_dir, file)
+            for t in range(1, 11):
+                if f'TEST_{t}' in file or f'test_{t}' in file:
+                    test_mapping[t] = filepath
+                    self.error_log['processed_files'].append({'test': f'TEST_{t}', 'filename': file})
                     break
+            else:
+                if 'ultrasonography' in file.lower() or 'Ultrasonography_Test_5' in file:
+                    test_mapping[5] = filepath
+
         if not test_mapping:
             raise FileNotFoundError(f"No test files found in {self.input_dir}")
+
+        self.error_log['tests_found'] = sorted(test_mapping.keys())
         return test_mapping
-    
+
     def load_test_sheet(self, filepath: str) -> pd.DataFrame:
-        """Load Responses sheet with flexible column mapping"""
         try:
             df = pd.read_excel(filepath, sheet_name='Responses')
-            
-            # Robust column detection
             col_map = {}
-            for col in df.columns:
-                c = str(col).strip().upper()
-                if any(k in c for k in ['FULL NAME', 'FULL NAMES', 'NAMES', 'NAME']):
-                    col_map[col] = 'Full Names'
-                elif 'EMAIL' in c:
-                    col_map[col] = 'Email'
-                elif any(k in c for k in ['RESULT', 'SCORE', 'MARK']):
-                    col_map[col] = 'Result'
-            
+
+            for field, candidates in self.column_config.items():
+                matched = self._fuzzy_match_column(df.columns.tolist(), candidates, field)
+                if matched:
+                    target = 'Full Names' if field == 'name' else field.capitalize()
+                    col_map[matched] = target
+                    continue
+                # Fallback keyword matching
+                for col in df.columns:
+                    c = str(col).strip().upper()
+                    if any(k in c for k in candidates):
+                        target = 'Full Names' if field == 'name' else field.capitalize()
+                        col_map[col] = target
+                        break
+
             df.rename(columns=col_map, inplace=True)
-            
-            if not all(c in df.columns for c in ['Full Names', 'Email', 'Result']):
-                self.error_log['warnings'].append({
+
+            required = ['Full Names', 'Email', 'Result']
+            if any(r not in df.columns for r in required):
+                self.error_log['column_mapping_issues'].append({
                     'file': os.path.basename(filepath),
-                    'warning': f'Missing key columns. Found: {df.columns.tolist()}'
+                    'missing': [r for r in required if r not in df.columns]
                 })
                 return pd.DataFrame()
-            
-            df_subset = df[['Full Names', 'Email', 'Result']].copy()
-            
+
+            df_subset = df[required].copy()
             df_subset['Full Names'] = df_subset['Full Names'].astype(str).str.strip()
-            df_subset['Email'] = df_subset['Email'].astype(str).str.strip()
+            df_subset['Email'] = df_subset['Email'].astype(str).str.strip().str.lower()
             df_subset['Result'] = pd.to_numeric(
-                df_subset['Result'].astype(str).str.rstrip('%'), errors='coerce'
+                df_subset['Result'].astype(str).str.replace('%', '', regex=False).str.strip(),
+                errors='coerce'
             )
-            df_subset = df_subset.dropna(subset=['Result'])
-            
-            return df_subset
+            return df_subset.dropna(subset=['Full Names', 'Email', 'Result'])
+
         except Exception as e:
             self.error_log['errors'].append({'file': os.path.basename(filepath), 'error': str(e)})
             return pd.DataFrame()
-    
-    def merge_test_results(self, test_mapping: Dict[int, str]) -> pd.DataFrame:
-        """Core logic: First attempt only + support for missing Test 1"""
+
+    def get_intelligent_grp_score(self, missed: int) -> float:
+        if missed == 0:   return 82.0
+        elif missed == 1: return 76.0
+        elif missed == 2: return 65.0
+        elif missed == 3: return 55.0
+        else:             return 50.0
+
+    def merge_test_results(self, test_mapping: Dict[int, str]) -> Tuple[pd.DataFrame, list]:
         all_rows = []
-        
         for test_num in sorted(test_mapping.keys()):
-            filepath = test_mapping[test_num]
-            test_df = self.load_test_sheet(filepath)
+            test_df = self.load_test_sheet(test_mapping[test_num])
             if test_df.empty:
                 continue
-                
             test_df = test_df.rename(columns={'Result': f'TEST_{test_num}'})
             test_df['TEST_NUMBER'] = test_num
-            test_df['SOURCE_FILE'] = os.path.basename(filepath)
+            test_df['SOURCE_FILE'] = os.path.basename(test_mapping[test_num])
             all_rows.append(test_df)
-        
+
         if not all_rows:
             raise ValueError("No valid test data found")
-        
+
         combined = pd.concat(all_rows, ignore_index=True)
-        
-        # Normalization
-        combined['EMAIL_NORM'] = combined['Email'].str.strip().str.lower()
+        combined['EMAIL_NORM'] = combined['Email']
         combined['NAME_NORM'] = combined['Full Names'].str.strip().str.upper()
-        
-        # Sort so first attempt appears first
         combined = combined.sort_values(by=['EMAIL_NORM', 'NAME_NORM', 'TEST_NUMBER', 'SOURCE_FILE'])
-        
-        # Keep only the FIRST attempt per test per participant
+
         deduped = combined.drop_duplicates(subset=['EMAIL_NORM', 'NAME_NORM', 'TEST_NUMBER'], keep='first')
-        
-        # Pivot: one row per participant, blanks where test is missing
+
         pivoted = deduped.pivot_table(
             index=['EMAIL_NORM', 'NAME_NORM', 'Full Names', 'Email'],
             columns='TEST_NUMBER',
-            values=[f'TEST_{i}' for i in range(1, 6)],
+            values=[f'TEST_{t}' for t in sorted(test_mapping.keys())],
             aggfunc='first'
         ).reset_index()
-        
-        # Ensure all TEST columns exist (missing = blank)
+
         pivoted.columns = [col[0] if isinstance(col, tuple) else col for col in pivoted.columns]
-        test_cols = [f'TEST_{i}' for i in range(1, 6)]
+
+        test_cols = [f'TEST_{t}' for t in sorted(test_mapping.keys())]
         for tc in test_cols:
             if tc not in pivoted.columns:
                 pivoted[tc] = pd.NA
-        
+
         pivoted = pivoted.sort_values(by='Full Names').reset_index(drop=True)
-        
-        # Derived columns
-        pivoted['GRP DISCUSSION'] = 0.8
-        pivoted['TOTAL MARK'] = pivoted[test_cols].sum(axis=1, skipna=True)
-        pivoted['SCORE'] = pivoted['TOTAL MARK'] * (100 / 6.0)
-        pivoted['STATUS'] = pivoted['SCORE'].apply(lambda x: "PASS" if x >= self.pass_mark else "FAIL")
+
+        # Intelligent GRP + calculations
         pivoted['TESTS_COMPLETED'] = pivoted[test_cols].notna().sum(axis=1)
-        
-        # Flag participants who missed Test 1 but took others (your color code)
-        mask_skipped_test1 = pivoted['TEST_1'].isna() & pivoted[['TEST_2','TEST_3','TEST_4','TEST_5']].notna().any(axis=1)
-        pivoted['REVIEW_FLAG'] = ''
-        pivoted.loc[mask_skipped_test1, 'REVIEW_FLAG'] = 'Skipped Test 1 - Verify manually'
-        
-        # Update log
-        self.error_log['skipped_test1_count'] = int(mask_skipped_test1.sum())
-        self.error_log['retakes_handled'] = int(combined.duplicated(subset=['EMAIL_NORM', 'NAME_NORM', 'TEST_NUMBER']).any())
-        
-        return pivoted
-    
-    def create_final_sheet(self, master_df: pd.DataFrame) -> openpyxl.Workbook:
-        """Create formatted sheet with yellow highlight for skipped Test 1"""
+        pivoted['MISSED_TESTS'] = len(test_cols) - pivoted['TESTS_COMPLETED']
+        pivoted['GRP DISCUSSION'] = pivoted['MISSED_TESTS'].apply(self.get_intelligent_grp_score)
+
+        num_components = len(test_cols) + 1
+        pivoted['TOTAL MARK'] = pivoted[test_cols].sum(axis=1, skipna=True) + pivoted['GRP DISCUSSION']
+        pivoted['SCORE'] = pivoted['TOTAL MARK'] / num_components
+        pivoted['STATUS'] = pivoted['SCORE'].apply(lambda x: "PASS" if x >= self.pass_mark else "FAIL")
+
+        # Review flag
+        if 'TEST_1' in pivoted.columns:
+            mask = pivoted['TEST_1'].isna() & pivoted[[c for c in test_cols if c != 'TEST_1']].notna().any(axis=1)
+            pivoted['REVIEW_FLAG'] = ''
+            pivoted.loc[mask, 'REVIEW_FLAG'] = 'Skipped Test 1 - Verify manually'
+            self.error_log['skipped_test1_count'] = int(mask.sum())
+
+        self.error_log['retakes_handled'] = int(combined.duplicated(subset=['EMAIL_NORM', 'NAME_NORM', 'TEST_NUMBER']).sum())
+
+        return pivoted, test_cols
+
+    def create_final_sheet(self, master_df: pd.DataFrame, test_cols: list) -> openpyxl.Workbook:
+        """Create final sheet with your requested per-test colors"""
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = 'Responses'
-        
-        headers = ['S/N', 'NAMES', 'EMAIL', 'TEST 1', 'TEST 2', 'TEST 3', 
-                   'TEST 4', 'TEST 5', 'GRP DISCUSSION', 'TOTAL MARK', 'SCORE', 
-                   'STATUS', 'TESTS_COMPLETED', 'REVIEW_FLAG']
-        
+
+        headers = ['S/N', 'NAMES', 'EMAIL'] + [f'TEST {int(c.split("_")[1])}' for c in test_cols] + \
+                  ['GRP DISCUSSION', 'TOTAL MARK', 'SCORE', 'STATUS', 'TESTS_COMPLETED', 'MISSED_TESTS', 'REVIEW_FLAG']
+
         ws.append(headers)
-        
-        # Header styling
+
         header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
         header_font = Font(bold=True, color='FFFFFF')
         for cell in ws[1]:
             cell.fill = header_fill
             cell.font = header_font
             cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-        
+
         thin_border = Border(left=Side(style='thin'), right=Side(style='thin'),
                              top=Side(style='thin'), bottom=Side(style='thin'))
-        yellow_fill = PatternFill(start_color='FFFFE0', end_color='FFFFE0', fill_type='solid')
-        
-        test_cols = ['TEST_1', 'TEST_2', 'TEST_3', 'TEST_4', 'TEST_5']
-        
+        yellow_fill = PatternFill(start_color='FFFF99', end_color='FFFF99', fill_type='solid')  # Review rows
+
+        # Test color fills
+        test_fills = {}
+        for t in range(1, 11):
+            color_hex = self.test_colors.get(t)
+            test_fills[t] = PatternFill(start_color=color_hex, end_color=color_hex, fill_type='solid') if color_hex else None
+
         for idx, row in master_df.iterrows():
             row_num = idx + 2
-            
+
             ws[f'A{row_num}'] = idx + 1
             ws[f'B{row_num}'] = row['Full Names']
             ws[f'C{row_num}'] = row['Email']
-            
-            # Test scores (leave blank if missing)
+
+            # Test columns with specific colors
             for col_idx, test_col in enumerate(test_cols):
+                test_num = int(test_col.split('_')[1])
                 col_letter = get_column_letter(4 + col_idx)
                 val = row.get(test_col)
+
+                cell = ws[f'{col_letter}{row_num}']
                 if pd.notna(val):
                     v = float(val)
-                    ws[f'{col_letter}{row_num}'] = v / 100 if v <= 100 else v
-                    ws[f'{col_letter}{row_num}'].number_format = '0.0%'
+                    cell.value = v / 100 if v <= 100 else v
+                    cell.number_format = '0.0%'
                 else:
-                    ws[f'{col_letter}{row_num}'] = None   # Explicitly blank
-            
-            ws[f'I{row_num}'] = 0.8
-            ws[f'J{row_num}'] = f'=SUM(D{row_num}:I{row_num})'
-            ws[f'K{row_num}'] = f'=J{row_num}*16.6666'
-            ws[f'L{row_num}'] = f'=IF(K{row_num}>={self.pass_mark},"PASS","FAIL")'
-            ws[f'M{row_num}'] = row.get('TESTS_COMPLETED', 0)
-            ws[f'N{row_num}'] = row.get('REVIEW_FLAG', '')
-            
-            # Apply borders and alignment
-            for col in range(1, 15):
+                    cell.value = None
+
+                # Apply color
+                if test_fills.get(test_num):
+                    cell.fill = test_fills[test_num]
+
+            # GRP DISCUSSION (neutral)
+            grp_letter = get_column_letter(4 + len(test_cols))
+            ws[f'{grp_letter}{row_num}'] = row['GRP DISCUSSION']
+            ws[f'{grp_letter}{row_num}'].number_format = '0.0%'
+
+            # Formulas
+            total_letter = get_column_letter(5 + len(test_cols))
+            score_letter = get_column_letter(6 + len(test_cols))
+            status_letter = get_column_letter(7 + len(test_cols))
+
+            ws[f'{total_letter}{row_num}'] = f'=SUM(D{row_num}:{get_column_letter(3 + len(test_cols))}{row_num})'
+            ws[f'{score_letter}{row_num}'] = f'={total_letter}{row_num}/{len(test_cols) + 1}'
+            ws[f'{status_letter}{row_num}'] = f'=IF({score_letter}{row_num}>={self.pass_mark},"PASS","FAIL")'
+
+            # Extra info
+            ws[f'{get_column_letter(8 + len(test_cols))}{row_num}'] = row.get('TESTS_COMPLETED', 0)
+            ws[f'{get_column_letter(9 + len(test_cols))}{row_num}'] = row.get('MISSED_TESTS', 0)
+            ws[f'{get_column_letter(10 + len(test_cols))}{row_num}'] = row.get('REVIEW_FLAG', '')
+
+            # Borders & alignment
+            for col in range(1, len(headers) + 1):
                 cell = ws.cell(row=row_num, column=col)
                 cell.border = thin_border
                 cell.alignment = Alignment(horizontal='center', vertical='center')
-                if 4 <= col <= 9 and cell.value is not None:
-                    cell.number_format = '0.0%'
-            
-            # Yellow highlight for participants who missed Test 1
+
+            # Yellow row for review
             if row.get('REVIEW_FLAG'):
-                for col in range(1, 15):
+                for col in range(1, len(headers) + 1):
                     ws.cell(row=row_num, column=col).fill = yellow_fill
-        
+
         # Column widths
         ws.column_dimensions['A'].width = 5
         ws.column_dimensions['B'].width = 35
         ws.column_dimensions['C'].width = 30
-        for col in list('DEFGHIJKLMN'):
-            ws.column_dimensions[col].width = 12
-        
+        for c in range(4, len(headers) + 1):
+            ws.column_dimensions[get_column_letter(c)].width = 14
+
         ws.freeze_panes = 'A2'
         return wb
-    
+
     def save_results(self, wb: openpyxl.Workbook, filename: str = None):
         if filename is None:
             filename = f"OBS_{self.month_year}_RESULT_SHEET.xlsx"
@@ -240,7 +319,7 @@ class TestResultsCollator:
         wb.save(filepath)
         self.error_log['output_file'] = filepath
         return filepath
-    
+
     def save_error_log(self):
         log_filename = f"collation_log_{self.month_year}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         log_path = os.path.join(self.output_dir, log_filename)
@@ -248,31 +327,29 @@ class TestResultsCollator:
         with open(log_path, 'w') as f:
             json.dump(self.error_log, f, indent=2)
         return log_path
-    
+
     def run(self) -> Tuple[str, bool]:
         try:
-            print(f"[INFO] Starting collation for {self.month_year}")
+            print(f"[INFO] Starting intelligent collation for {self.month_year}")
             test_mapping = self.discover_test_files()
-            print(f"  Found tests: {sorted(test_mapping.keys())}")
-            
-            print("[STEP 2] Merging results (keeping first attempt, blanks for missed tests)...")
-            master_df = self.merge_test_results(test_mapping)
-            print(f"  Processed {len(master_df)} unique participants")
-            
-            print("[STEP 3] Creating final formatted sheet...")
-            wb = self.create_final_sheet(master_df)
-            
-            print("[STEP 4] Saving output...")
+            print(f"  Found tests: {self.error_log['tests_found']}")
+
+            print("[STEP 2] Merging with intelligent GRP grading...")
+            master_df, test_cols = self.merge_test_results(test_mapping)
+            print(f"  Processed {len(master_df)} participants")
+
+            print("[STEP 3] Creating final sheet with color coding...")
+            wb = self.create_final_sheet(master_df, test_cols)
+
             output_path = self.save_results(wb)
             log_path = self.save_error_log()
-            
-            print(f"  Output Excel: {output_path}")
-            print(f"  Log: {log_path}")
-            print(f"  Skipped Test 1 cases: {self.error_log['skipped_test1_count']} (highlighted in yellow)")
-            
+
+            print(f"  Output: {output_path}")
+            if self.error_log.get('skipped_test1_count', 0) > 0:
+                print(f"  Skipped Test 1 cases: {self.error_log['skipped_test1_count']} (yellow row)")
+
             success = len(self.error_log['errors']) == 0
             return output_path, success
-            
         except Exception as e:
             self.error_log['errors'].append({'error': str(e)})
             self.save_error_log()
@@ -284,11 +361,10 @@ def main():
     if len(sys.argv) < 3:
         print("Usage: python test_collation_automation.py <input_dir> <output_dir> [month_year]")
         sys.exit(1)
-    
     input_dir = sys.argv[1]
     output_dir = sys.argv[2]
     month_year = sys.argv[3] if len(sys.argv) > 3 else datetime.now().strftime('%b_%Y').upper()
-    
+
     collator = TestResultsCollator(input_dir, output_dir, month_year)
     output_path, success = collator.run()
     sys.exit(0 if success else 1)
