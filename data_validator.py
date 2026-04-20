@@ -1,13 +1,3 @@
-#!/usr/bin/env python3
-"""
-Quality Assurance Validator for Test Results
-Advanced version that beats manual Excel expert review
-- Dynamic test support
-- Color, formula, and score recalculation audits
-- Statistical + outlier analysis
-- GRP logic verification
-"""
-
 import pandas as pd
 import openpyxl
 from openpyxl import load_workbook
@@ -32,7 +22,7 @@ class TestDataValidator:
 
     def validate_input_files(self, input_dir: str) -> Dict:
         print("\n[PRE-PROCESSING] Validating input files...")
-        # (Kept minimal but functional – same as previous version)
+
         report = {'files_found': [], 'missing_tests': [], 'status': 'OK'}
         found_tests = set()
 
@@ -79,29 +69,22 @@ class TestDataValidator:
         ws = wb['Responses']
         df = pd.read_excel(output_filepath, sheet_name='Responses')
 
-        # Basic info
         report['data_rows'] = len(df)
         report['file_size_kb'] = round(os.path.getsize(output_filepath) / 1024, 2)
 
-        # === ADVANCED CHECKS START HERE ===
         advanced = {}
 
-        # 1. Color coding verification
         color_issues = self._check_test_colors(ws, df.columns)
         advanced['color_check'] = {'status': 'OK' if not color_issues else 'FAIL', 'issues': color_issues}
 
-        # 2. Formula integrity (every row)
         formula_issues = self._audit_formulas(ws)
         advanced['formula_audit'] = {'status': 'OK' if not formula_issues else 'FAIL', 'issues': formula_issues[:10]}
 
-        # 3. Score recalculation & GRP logic verification
         recalc_issues = self._recalculate_scores(df)
         advanced['score_recalculation'] = {'status': 'OK' if not recalc_issues else 'FAIL', 'issues': recalc_issues[:8]}
 
-        # 4. Statistical analysis
         advanced['statistics'] = self._run_statistics(df)
 
-        # 5. Outlier detection
         outliers = self._detect_outliers(df)
         advanced['outliers'] = {'count': len(outliers), 'samples': outliers[:5]}
 
@@ -120,7 +103,6 @@ class TestDataValidator:
             col_letter = openpyxl.utils.get_column_letter(idx + 1)
             color = expected_colors.get(test_num)
 
-            # Check first data row for fill color
             cell = ws[f'{col_letter}2']
             fill_color = cell.fill.start_color.index if cell.fill.start_color.index != '00000000' else None
 
@@ -133,14 +115,14 @@ class TestDataValidator:
     def _audit_formulas(self, ws):
         issues = []
         for row in range(2, ws.max_row + 1):
-            # Check TOTAL MARK has SUM formula
+
             total_cell = ws[f'{openpyxl.utils.get_column_letter(ws.max_column - 6)}{row}']
             if not isinstance(total_cell.value, str) or 'SUM' not in total_cell.value:
                 issues.append(f"Row {row}: TOTAL MARK formula missing")
-            # Check SCORE and STATUS formulas exist
+
             if not any('=' in str(ws.cell(row=row, column=c).value) for c in range(ws.max_column - 3, ws.max_column - 1)):
                 issues.append(f"Row {row}: SCORE/STATUS formula issue")
-            if len(issues) > 15:  # limit reporting
+            if len(issues) > 15:
                 break
         return issues
 
@@ -150,7 +132,6 @@ class TestDataValidator:
         if not test_cols:
             return ["No test columns found"]
 
-        # Recompute GRP, TOTAL, SCORE
         df = df.copy()
         df['TESTS_COMPLETED'] = df[test_cols].notna().sum(axis=1)
         df['MISSED_TESTS'] = len(test_cols) - df['TESTS_COMPLETED']
@@ -160,7 +141,6 @@ class TestDataValidator:
         df['TOTAL_RECALC'] = df[test_cols].sum(axis=1, skipna=True) + df['GRP_RECALC']
         df['SCORE_RECALC'] = df['TOTAL_RECALC'] / (len(test_cols) + 1)
 
-        # Compare with Excel output
         mismatches = df[
             (abs(df['TOTAL MARK'] - df['TOTAL_RECALC']) > 0.1) |
             (abs(df['SCORE'] - df['SCORE_RECALC']) > 0.01)
@@ -241,7 +221,6 @@ class TestDataValidator:
             print("✅ VALIDATION PASSED – All advanced checks clear")
         print("="*85)
         return not has_errors
-
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:

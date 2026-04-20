@@ -1,13 +1,3 @@
-#!/usr/bin/env python3
-"""
-Obstetrics & Gynecology Test Results Collation Automation
-- Intelligent GRP DISCUSSION based on number of missed tests
-- Dynamic support for any number of tests
-- First attempt only for retakes
-- Intelligent column name discovery
-- Per-test color coding as requested
-"""
-
 import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -18,7 +8,6 @@ import json
 import sys
 from typing import Dict, Tuple, List, Optional
 
-# Fuzzy matching (recommended: pip install rapidfuzz)
 try:
     from rapidfuzz import process, fuzz
     FUZZY_LIB = "rapidfuzz"
@@ -30,7 +19,6 @@ except ImportError:
         FUZZY_LIB = None
         print("[WARNING] No fuzzy library installed. Using basic keyword matching only.")
 
-
 class TestResultsCollator:
     def __init__(self, input_dir: str, output_dir: str, month_year: str):
         self.input_dir = input_dir
@@ -39,7 +27,6 @@ class TestResultsCollator:
         self.pass_mark = 50
         self.fuzzy_threshold = 82
 
-        # YAML-style column configuration
         self.column_config = {
             "name": [
                 "FULL NAME", "FULL NAMES", "NAMES", "NAME", "STUDENT NAME",
@@ -56,14 +43,13 @@ class TestResultsCollator:
             ]
         }
 
-        # === Per-test color coding (as per your request) ===
         self.test_colors = {
-            1: None,        # Test 1 - White / Default
-            2: "B0E0FF",    # Sky Blue
-            3: "FFFFE0",    # Yellow
-            4: "C6EFCE",    # Green
-            5: "FFCCCC",    # Soft Red
-            # 6 and above: None (neutral)
+            1: None,
+            2: "B0E0FF",
+            3: "FFFFE0",
+            4: "C6EFCE",
+            5: "FFCCCC",
+
         }
 
         self.error_log = {
@@ -122,7 +108,7 @@ class TestResultsCollator:
                     target = 'Full Names' if field == 'name' else field.capitalize()
                     col_map[matched] = target
                     continue
-                # Fallback keyword matching
+
                 for col in df.columns:
                     c = str(col).strip().upper()
                     if any(k in c for k in candidates):
@@ -197,7 +183,6 @@ class TestResultsCollator:
 
         pivoted = pivoted.sort_values(by='Full Names').reset_index(drop=True)
 
-        # Intelligent GRP + calculations
         pivoted['TESTS_COMPLETED'] = pivoted[test_cols].notna().sum(axis=1)
         pivoted['MISSED_TESTS'] = len(test_cols) - pivoted['TESTS_COMPLETED']
         pivoted['GRP DISCUSSION'] = pivoted['MISSED_TESTS'].apply(self.get_intelligent_grp_score)
@@ -207,7 +192,6 @@ class TestResultsCollator:
         pivoted['SCORE'] = pivoted['TOTAL MARK'] / num_components
         pivoted['STATUS'] = pivoted['SCORE'].apply(lambda x: "PASS" if x >= self.pass_mark else "FAIL")
 
-        # Review flag
         if 'TEST_1' in pivoted.columns:
             mask = pivoted['TEST_1'].isna() & pivoted[[c for c in test_cols if c != 'TEST_1']].notna().any(axis=1)
             pivoted['REVIEW_FLAG'] = ''
@@ -219,13 +203,12 @@ class TestResultsCollator:
         return pivoted, test_cols
 
     def create_final_sheet(self, master_df: pd.DataFrame, test_cols: list) -> openpyxl.Workbook:
-        """Create final sheet with your requested per-test colors"""
+
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = 'Responses'
 
-        headers = ['S/N', 'NAMES', 'EMAIL'] + [f'TEST {int(c.split("_")[1])}' for c in test_cols] + \
-                  ['GRP DISCUSSION', 'TOTAL MARK', 'SCORE', 'STATUS', 'TESTS_COMPLETED', 'MISSED_TESTS', 'REVIEW_FLAG']
+        headers = ['S/N', 'NAMES', 'EMAIL'] + [f'TEST {int(c.split("_")[1])}' for c in test_cols] +                  ['GRP DISCUSSION', 'TOTAL MARK', 'SCORE', 'STATUS', 'TESTS_COMPLETED', 'MISSED_TESTS', 'REVIEW_FLAG']
 
         ws.append(headers)
 
@@ -238,9 +221,8 @@ class TestResultsCollator:
 
         thin_border = Border(left=Side(style='thin'), right=Side(style='thin'),
                              top=Side(style='thin'), bottom=Side(style='thin'))
-        yellow_fill = PatternFill(start_color='FFFF99', end_color='FFFF99', fill_type='solid')  # Review rows
+        yellow_fill = PatternFill(start_color='FFFF99', end_color='FFFF99', fill_type='solid')
 
-        # Test color fills
         test_fills = {}
         for t in range(1, 11):
             color_hex = self.test_colors.get(t)
@@ -253,7 +235,6 @@ class TestResultsCollator:
             ws[f'B{row_num}'] = row['Full Names']
             ws[f'C{row_num}'] = row['Email']
 
-            # Test columns with specific colors
             for col_idx, test_col in enumerate(test_cols):
                 test_num = int(test_col.split('_')[1])
                 col_letter = get_column_letter(4 + col_idx)
@@ -267,16 +248,13 @@ class TestResultsCollator:
                 else:
                     cell.value = None
 
-                # Apply color
                 if test_fills.get(test_num):
                     cell.fill = test_fills[test_num]
 
-            # GRP DISCUSSION (neutral)
             grp_letter = get_column_letter(4 + len(test_cols))
             ws[f'{grp_letter}{row_num}'] = row['GRP DISCUSSION']
             ws[f'{grp_letter}{row_num}'].number_format = '0.0%'
 
-            # Formulas
             total_letter = get_column_letter(5 + len(test_cols))
             score_letter = get_column_letter(6 + len(test_cols))
             status_letter = get_column_letter(7 + len(test_cols))
@@ -285,23 +263,19 @@ class TestResultsCollator:
             ws[f'{score_letter}{row_num}'] = f'={total_letter}{row_num}/{len(test_cols) + 1}'
             ws[f'{status_letter}{row_num}'] = f'=IF({score_letter}{row_num}>={self.pass_mark},"PASS","FAIL")'
 
-            # Extra info
             ws[f'{get_column_letter(8 + len(test_cols))}{row_num}'] = row.get('TESTS_COMPLETED', 0)
             ws[f'{get_column_letter(9 + len(test_cols))}{row_num}'] = row.get('MISSED_TESTS', 0)
             ws[f'{get_column_letter(10 + len(test_cols))}{row_num}'] = row.get('REVIEW_FLAG', '')
 
-            # Borders & alignment
             for col in range(1, len(headers) + 1):
                 cell = ws.cell(row=row_num, column=col)
                 cell.border = thin_border
                 cell.alignment = Alignment(horizontal='center', vertical='center')
 
-            # Yellow row for review
             if row.get('REVIEW_FLAG'):
                 for col in range(1, len(headers) + 1):
                     ws.cell(row=row_num, column=col).fill = yellow_fill
 
-        # Column widths
         ws.column_dimensions['A'].width = 5
         ws.column_dimensions['B'].width = 35
         ws.column_dimensions['C'].width = 30
@@ -356,7 +330,6 @@ class TestResultsCollator:
             print(f"[ERROR] {str(e)}")
             return None, False
 
-
 def main():
     if len(sys.argv) < 3:
         print("Usage: python test_collation_automation.py <input_dir> <output_dir> [month_year]")
@@ -368,7 +341,6 @@ def main():
     collator = TestResultsCollator(input_dir, output_dir, month_year)
     output_path, success = collator.run()
 
-    # Automatic Validation Integration
     if output_path and success:
         try:
             from data_validator import TestDataValidator
@@ -379,7 +351,6 @@ def main():
             print(f"[WARNING] Advanced validation skipped: {e}")
 
     sys.exit(0 if success else 1)
-
 
 if __name__ == '__main__':
     main()
