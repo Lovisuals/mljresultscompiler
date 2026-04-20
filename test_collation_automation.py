@@ -367,6 +367,17 @@ def main():
 
     collator = TestResultsCollator(input_dir, output_dir, month_year)
     output_path, success = collator.run()
+
+    # Automatic Validation Integration
+    if output_path and success:
+        try:
+            from data_validator import TestDataValidator
+            validator = TestDataValidator()
+            validator.run_full_validation(input_dir, output_path)
+            validator.save_report(output_dir)
+        except (ImportError, Exception) as e:
+            print(f"[WARNING] Advanced validation skipped: {e}")
+
     sys.exit(0 if success else 1)
 
 

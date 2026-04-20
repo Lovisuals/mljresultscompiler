@@ -14,6 +14,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 import os
 import json
+import sys
 from typing import Dict, Optional
 from datetime import datetime
 
@@ -249,5 +250,5 @@ if __name__ == '__main__':
 
     validator = TestDataValidator()
     success = validator.run_full_validation(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None)
-    validator.save_report(sys.argv[2] if len(sys.argv) > 2 else sys.argv[1])
+    validator.save_report(os.path.dirname(sys.argv[2]) if len(sys.argv) > 2 else sys.argv[1])
     sys.exit(0 if success else 1)
