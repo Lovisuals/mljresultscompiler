@@ -31,13 +31,33 @@ from src.session_manager import SessionManager, WorkflowAgent, ConversationalSes
 
 try:
     from src.intent_engine import IntentEngine
-    from src.document_parser import UniversalDocumentParser
-    from src.agent_router import AgentRouter
-    from config import ConversationalConfig
-    CONVERSATIONAL_ENABLED = True
+    INTENT_ENGINE_AVAILABLE = True
 except ImportError as e:
-    logger.warning(f"Conversational features not available: {e}")
-    CONVERSATIONAL_ENABLED = False
+    logger.warning(f"Intent Engine not available: {e}")
+    INTENT_ENGINE_AVAILABLE = False
+
+try:
+    from src.document_parser import UniversalDocumentParser
+    DOCUMENT_PARSER_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Document Parser not available: {e}")
+    DOCUMENT_PARSER_AVAILABLE = False
+
+try:
+    from src.agent_router import AgentRouter
+    AGENT_ROUTER_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Agent Router not available: {e}")
+    AGENT_ROUTER_AVAILABLE = False
+
+try:
+    from config import ConversationalConfig
+    CONFIG_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Conversational Config not available: {e}")
+    CONFIG_AVAILABLE = False
+
+CONVERSATIONAL_ENABLED = INTENT_ENGINE_AVAILABLE and DOCUMENT_PARSER_AVAILABLE and AGENT_ROUTER_AVAILABLE and CONFIG_AVAILABLE
 
 load_dotenv(dotenv_path='.env')
 
@@ -53,22 +73,41 @@ class TelegramBotHandler:
         self.token = token
         self.bot_token = token
 
-        if CONVERSATIONAL_ENABLED:
+        if INTENT_ENGINE_AVAILABLE:
             try:
                 self.intent_engine = IntentEngine()
-                self.document_parser = UniversalDocumentParser()
-                self.agent_router = AgentRouter()
-                self.conversational_config = ConversationalConfig()
-                logger.info("Conversational intelligence enabled")
             except Exception as e:
-                logger.warning(f"Could not initialize conversational features: {e}")
+                logger.warning(f"Could not initialize intent engine: {e}")
                 self.intent_engine = None
-                self.document_parser = None
-                self.agent_router = None
         else:
             self.intent_engine = None
+
+        if DOCUMENT_PARSER_AVAILABLE:
+            try:
+                self.document_parser = UniversalDocumentParser()
+            except Exception as e:
+                logger.warning(f"Could not initialize document parser: {e}")
+                self.document_parser = None
+        else:
             self.document_parser = None
+
+        if AGENT_ROUTER_AVAILABLE:
+            try:
+                self.agent_router = AgentRouter()
+            except Exception as e:
+                logger.warning(f"Could not initialize agent router: {e}")
+                self.agent_router = None
+        else:
             self.agent_router = None
+
+        if CONFIG_AVAILABLE:
+            try:
+                self.conversational_config = ConversationalConfig()
+            except Exception as e:
+                logger.warning(f"Could not initialize conversational config: {e}")
+                self.conversational_config = None
+        else:
+            self.conversational_config = None
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
@@ -811,11 +850,12 @@ def build_application(token: str) -> Application:
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("start", handler.start),
-            MessageHandler(filters.Document.FileExtension("xlsx"), handler.handle_document),
+            CommandHandler("consolidate", handler.consolidate_command),
+            MessageHandler(filters.Document.FileExtension(["xlsx", "XLSX"]), handler.handle_document),
         ],
         states={
             SELECTING_FORMAT: [
-                MessageHandler(filters.Document.FileExtension("xlsx"), handler.handle_document),
+                MessageHandler(filters.Document.FileExtension(["xlsx", "XLSX"]), handler.handle_document),
                 CallbackQueryHandler(handler.format_selected),
                 CommandHandler("consolidate", handler.consolidate_command),
             ],
@@ -838,6 +878,7 @@ def build_application(token: str) -> Application:
     application.add_handler(CommandHandler("help", handler.help_command))
     application.add_handler(CommandHandler("start", handler.start))
 
+    application.add_handler(CommandHandler("consolidate", handler.consolidate_command))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handler.handle_message)
     )
