@@ -10,10 +10,30 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.config import get_settings, validate_settings
-from src.session_storage import get_session_db
-from src.async_ai_service import initialize_async_ai, shutdown_async_ai
-from src.async_data_agent import initialize_async_data_agent, shutdown_async_data_agent
-from src.async_file_io import initialize_async_file_io, shutdown_async_file_io
+
+try:
+    from src.session_storage import get_session_db
+    SESSION_STORAGE_AVAILABLE = True
+except ImportError:
+    SESSION_STORAGE_AVAILABLE = False
+
+try:
+    from src.async_ai_service import initialize_async_ai, shutdown_async_ai
+    AI_SERVICE_AVAILABLE = True
+except ImportError:
+    AI_SERVICE_AVAILABLE = False
+
+try:
+    from src.async_data_agent import initialize_async_data_agent, shutdown_async_data_agent
+    DATA_AGENT_AVAILABLE = True
+except ImportError:
+    DATA_AGENT_AVAILABLE = False
+
+try:
+    from src.async_file_io import initialize_async_file_io, shutdown_async_file_io
+    FILE_IO_AVAILABLE = True
+except ImportError:
+    FILE_IO_AVAILABLE = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,26 +56,20 @@ def start_bot_thread():
 
     settings = get_settings()
     if not settings.ENABLE_TELEGRAM_BOT:
-        logger.info("Telegram bot disabled (ENABLE_TELEGRAM_BOT=false)")
         return None
 
     token = os.getenv('TELEGRAM_BOT_TOKEN')
     if not token:
-        logger.warning("TELEGRAM_BOT_TOKEN not set, bot will not start")
         return None
 
     with bot_lock:
         if bot_initialized and bot_thread and bot_thread.is_alive():
-            logger.warning("Bot already running, skipping duplicate")
             return bot_thread
         bot_initialized = True
 
     def bot_worker():
         try:
             from dotenv import load_dotenv
-
-            logger.info("Initializing Telegram bot in background thread...")
-
             load_dotenv(dotenv_path='.env')
 
             try:
@@ -63,14 +77,10 @@ def start_bot_thread():
                 from telegram import Update
                 from telegram.error import Conflict, NetworkError, TelegramError
             except Exception as e:
-                logger.error(f"Failed to import telegram_bot: {e}", exc_info=True)
+                logger.error(f"Bot initialization failed: {e}")
                 return
 
             token = os.getenv('TELEGRAM_BOT_TOKEN')
-            if not token:
-                logger.error("TELEGRAM_BOT_TOKEN not available in bot thread")
-                return
-
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
@@ -83,123 +93,54 @@ def start_bot_thread():
                     try:
                         application = build_application(token)
                         await application.initialize()
-                        logger.info("Bot initialized")
-
                         try:
                             await application.bot.delete_webhook(drop_pending_updates=True)
-                        except Exception:
+                        except:
                             pass
-
-                        logger.info("Starting bot polling...")
                         await application.start()
                         await application.updater.start_polling(
                             allowed_updates=Update.ALL_TYPES,
                             drop_pending_updates=True
                         )
-                        logger.info("Bot is now polling for updates")
-
                         stop_event = asyncio.Event()
-
                         async def check_shutdown():
                             while not is_shutting_down and application.updater and application.updater.running:
                                 await asyncio.sleep(1)
                             stop_event.set()
-
                         asyncio.create_task(check_shutdown())
                         await stop_event.wait()
-
                         if is_shutting_down:
-                            logger.info("Shutting down bot gracefully...")
                             await application.updater.stop()
                             await application.stop()
                             await application.shutdown()
                             return False
                         else:
-                            logger.warning("Bot polling stopped unexpectedly. Preparing to restart...")
-                            try:
-                                await application.updater.stop()
-                                await application.stop()
-                                await application.shutdown()
-                            except Exception:
-                                pass
-
+                            await application.updater.stop()
+                            await application.stop()
+                            await application.shutdown()
                             await asyncio.sleep(10)
                             return True
-
-                    except Conflict as e:
+                    except (Conflict, TelegramError, NetworkError) as e:
                         retry_count += 1
-                        wait_time = 30 if retry_count <= 3 else min(5 ** min(retry_count - 3, 4), 120)
-                        logger.error(f"Bot conflict #{retry_count}/{max_retries}: {e}")
-
+                        await asyncio.sleep(min(2 ** retry_count, 60))
                         if application:
                             try:
-                                if application.updater and application.updater.running:
-                                    await application.updater.stop()
-                                if application.running:
-                                    await application.stop()
                                 await application.shutdown()
-                            except:
-                                pass
-
-                        await asyncio.sleep(wait_time)
-
-                    except (TelegramError, NetworkError) as e:
-                        retry_count += 1
-                        wait_time = min(2 ** retry_count, 60)
-                        logger.warning(f"Bot network error #{retry_count}: {e}")
-
-                        if application:
-                            try:
-                                if application.updater and application.updater.running:
-                                    await application.updater.stop()
-                                if application.running:
-                                    await application.stop()
-                                await application.shutdown()
-                            except:
-                                pass
-
-                        await asyncio.sleep(wait_time)
-
+                            except: pass
                     except Exception as e:
                         retry_count += 1
-                        logger.error(f"Bot error #{retry_count}: {e}", exc_info=True)
-
-                        if application:
-                            try:
-                                if application.updater and application.updater.running:
-                                    await application.updater.stop()
-                                if application.running:
-                                    await application.stop()
-                                await application.shutdown()
-                            except:
-                                pass
-
                         await asyncio.sleep(10)
-
-                logger.error(f"Bot max retries ({max_retries}) exceeded")
                 return True
 
             async def run_bot_forever():
-                restart_count = 0
                 while True:
-                    should_restart = await run_bot_with_retry()
-                    if not should_restart:
-                        break
-
-                    restart_count += 1
-                    cooldown = min(60 * restart_count, 300)
-                    logger.warning(f"Bot restart #{restart_count} — cooling down {cooldown}s before retry cycle...")
-                    await asyncio.sleep(cooldown)
+                    if not await run_bot_with_retry(): break
+                    await asyncio.sleep(60)
 
             try:
                 loop.run_until_complete(run_bot_forever())
-            except Exception as e:
-                logger.error(f"Fatal bot error: {e}", exc_info=True)
             finally:
                 loop.close()
-
-        except Exception as e:
-            logger.error(f"Bot thread fatal error: {e}", exc_info=True)
         finally:
             global bot_initialized
             with bot_lock:
@@ -207,269 +148,77 @@ def start_bot_thread():
 
     thread = threading.Thread(target=bot_worker, daemon=True)
     thread.start()
-    logger.info("Bot thread started")
     return thread
 
 def start_cm_bot_thread():
     global cm_bot_thread, cm_bot_initialized
-
-    from dotenv import load_dotenv
-    load_dotenv(dotenv_path='.env')
-
     settings = get_settings()
     token = settings.MLJCM_BOT_TOKEN or os.getenv('MLJCM_BOT_TOKEN')
-
     if not token:
-        logger.info("MLJCM_BOT_TOKEN not set, Content Manager bot will not start")
         return None
-
     with cm_bot_lock:
         if cm_bot_initialized and cm_bot_thread and cm_bot_thread.is_alive():
-            logger.warning("MLJCM bot already running, skipping duplicate")
             return cm_bot_thread
         cm_bot_initialized = True
 
     def cm_worker():
         try:
             from dotenv import load_dotenv
-            logger.info("Initializing MLJCM bot in background thread...")
             load_dotenv(dotenv_path='.env')
-
             try:
                 from content_manager.cm_bot import ContentManagerBot
                 from content_manager.storage import CMStorage
-            except Exception as e:
-                logger.error(f"Failed to import MLJCM components: {e}", exc_info=True)
+            except:
                 return
-
-            token = getattr(get_settings(), 'MLJCM_BOT_TOKEN', None) or os.getenv('MLJCM_BOT_TOKEN')
-            if not token:
-                logger.error("MLJCM_BOT_TOKEN not available in bot thread")
-                return
-
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            async def run_cm_bot():
+                try:
+                    storage = CMStorage()
+                    cm_bot = ContentManagerBot(token=token, storage=storage)
+                    await cm_bot.initialize()
+                    await cm_bot.start_polling()
+                    while not is_shutting_down:
+                        await asyncio.sleep(1)
+                    await cm_bot.shutdown()
+                except:
+                    pass
+            loop.run_until_complete(run_cm_bot())
+        finally:
+            global cm_bot_initialized
+            with cm_bot_lock:
+                cm_bot_initialized = False
 
-            async def run_cm_bot_with_retry():
-                from telegram.error import Conflict, NetworkError, TelegramError
-                retry_count = 0
-                max_retries = 30
-
-                while retry_count < max_retries:
-                    cm_bot = None
-                    try:
-                        storage = CMStorage()
-                        cm_bot = ContentManagerBot(token=token, storage=storage)
-                        await cm_bot.initialize()
-
-                        try:
-                            await cm_bot.application.bot.delete_webhook(drop_pending_updates=True)
-                        except:
-                            pass
-
-                        logger.info("Starting MLJCM polling...")
-                        await cm_bot.start_polling()
-
-                        cm_stop_event = asyncio.Event()
-
-                        async def check_cm_shutdown():
-                            while not is_shutting_down and cm_bot.application.updater and cm_bot.application.updater.running:
-                                await asyncio.sleep(1)
-                            cm_stop_event.set()
-
-                        asyncio.create_task(check_cm_shutdown())
-                        await cm_stop_event.wait()
-
-                        if is_shutting_down:
-                            logger.info("Shutting down MLJCM gracefully...")
-                            await cm_bot.shutdown()
-                            return False
-                        else:
-                            logger.warning("MLJCM polling stopped unexpectedly. Preparing to restart...")
-                            try:
-                                await cm_bot.shutdown()
-                            except Exception:
-                                pass
-
-                            await asyncio.sleep(10)
-                            return True
-
-                    except Conflict as e:
-                        retry_count += 1
-                        wait_time = 30 if retry_count <= 3 else min(5 ** min(retry_count - 3, 4), 120)
-                        logger.error(f"MLJCM conflict #{retry_count}: {e}")
-
-                        if cm_bot:
-                            try:
-                                await cm_bot.shutdown()
-                            except:
-                                pass
-                        await asyncio.sleep(wait_time)
-
-                    except (TelegramError, NetworkError) as e:
-                        retry_count += 1
-                        wait_time = min(2 ** retry_count, 60)
-                        logger.warning(f"MLJCM network error #{retry_count}: {e}")
-                        if cm_bot:
-                            try:
-                                await cm_bot.shutdown()
-                            except:
-                                pass
-                        await asyncio.sleep(wait_time)
-
-                    except Exception as e:
-                        retry_count += 1
-                        logger.error(f"MLJCM Bot error #{retry_count}: {e}", exc_info=True)
-                        if cm_bot:
-                            try:
-                                await cm_bot.shutdown()
-                            except:
-                                pass
-                        await asyncio.sleep(10)
-
-                logger.error("MLJCM max retries exceeded")
-                return True
-
-            async def run_cm_bot_forever():
-                restart_count = 0
-                while True:
-                    should_restart = await run_cm_bot_with_retry()
-                    if not should_restart:
-                        break
-
-                    restart_count += 1
-                    cooldown = min(60 * restart_count, 300)
-                    logger.warning(f"MLJCM restart #{restart_count} - sleeping {cooldown}s")
-                    await asyncio.sleep(cooldown)
-
-            try:
-                loop.run_until_complete(run_cm_bot_forever())
-            except Exception as e:
-                logger.error(f"Fatal MLJCM error: {e}", exc_info=True)
-            finally:
-                loop.close()
-                global cm_bot_initialized
-                with cm_bot_lock:
-                    cm_bot_initialized = False
-
-        except Exception as e:
-            logger.error(f"Failed to start MLJCM bot thread: {e}", exc_info=True)
-
-    cm_bot_thread = threading.Thread(target=cm_worker, daemon=True, name="MLJCM-Thread")
+    cm_bot_thread = threading.Thread(target=cm_worker, daemon=True)
     cm_bot_thread.start()
-    logger.info("MLJCM bot thread started")
     return cm_bot_thread
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-
     global bot_thread, cm_bot_thread, is_shutting_down
-
-    logger.info("=" * 60)
-    logger.info("🚀 MLJ Results Compiler Starting")
-    logger.info("=" * 60)
-
     try:
-
-        logger.info("Validating configuration...")
         validate_settings()
-        settings = get_settings()
-        logger.info(f"  Environment: {settings.ENV}")
-        logger.info(f"  Database: {settings.DATABASE_URL}")
-        logger.info(f"  AI Enabled: {settings.ENABLE_AI_ASSISTANT}")
-        logger.info(f"  Telegram Bot: {settings.ENABLE_TELEGRAM_BOT}")
-
-        logger.info("Initializing database...")
-        db = get_session_db()
-        stats = db.get_session_statistics()
-        logger.info(f"  Database initialized")
-        logger.info(f"  Existing sessions: {stats['total_sessions']}")
-
-        logger.info("Cleaning up expired sessions...")
-        cleaned = db.cleanup_expired_sessions()
-        logger.info(f"  Removed {cleaned} expired sessions")
-
-        logger.info("Initializing async services...")
-        await initialize_async_ai()
-        await initialize_async_data_agent()
-        await initialize_async_file_io()
-        logger.info("✓ Async services initialized")
-
-        logger.info("Starting Telegram bot (if enabled)...")
+        if AI_SERVICE_AVAILABLE: await initialize_async_ai()
+        if DATA_AGENT_AVAILABLE: await initialize_async_data_agent()
+        if FILE_IO_AVAILABLE: await initialize_async_file_io()
         bot_thread = start_bot_thread()
-
-        logger.info("Starting MLJCM bot (if token provided)...")
         cm_bot_thread = start_cm_bot_thread()
-
         def signal_handler(sig, frame):
-            logger.warning(f"Received signal {sig}, initiating shutdown...")
-
+            global is_shutting_down
+            is_shutting_down = True
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
-
-        logger.info("✓ Application started successfully")
-        logger.info("=" * 60)
-
     except Exception as e:
-        logger.error(f"Startup error: {e}", exc_info=True)
-        raise
-
+        logger.error(f"Startup error: {e}")
     yield
-
-    logger.info("=" * 60)
-    logger.info("🛑 MLJ Results Compiler Shutting Down")
-    logger.info("=" * 60)
-
     is_shutting_down = True
-
-    if bot_thread and bot_thread.is_alive():
-        logger.info("Waiting for bottom primary thread to stop...")
-        bot_thread.join(timeout=3)
-
-    if cm_bot_thread and cm_bot_thread.is_alive():
-        logger.info("Waiting for cm bot thread to stop...")
-        cm_bot_thread.join(timeout=3)
-
-    try:
-
-        logger.info("Shutting down async services...")
-        await shutdown_async_ai()
-        await shutdown_async_data_agent()
-        await shutdown_async_file_io()
-        logger.info("✓ Async services shutdown")
-
-        logger.info("Closing database connections...")
-        db.cleanup_expired_sessions()
-        logger.info("✓ Database cleaned up")
-
-        settings = get_settings()
-        upload_dir = Path(settings.UPLOAD_DIR)
-        if upload_dir.exists():
-            import shutil
-            for item in upload_dir.iterdir():
-                if item.is_dir():
-                    try:
-                        shutil.rmtree(item, ignore_errors=True)
-                    except Exception as e:
-                        logger.warning(f"Failed to cleanup {item}: {e}")
-
-        logger.info("✓ Application shut down gracefully")
-        logger.info("=" * 60)
-
-    except Exception as e:
-        logger.error(f"Shutdown error: {e}", exc_info=True)
+    if AI_SERVICE_AVAILABLE: await shutdown_async_ai()
+    if DATA_AGENT_AVAILABLE: await shutdown_async_data_agent()
+    if FILE_IO_AVAILABLE: await shutdown_async_file_io()
 
 def create_app() -> FastAPI:
-
     settings = get_settings()
-
-    app = FastAPI(
-        title=settings.APP_NAME,
-        version=settings.APP_VERSION,
-        description="Excel consolidation and grading system with Telegram bot",
-        lifespan=lifespan
-    )
-
+    app = FastAPI(title=settings.APP_NAME, version=settings.APP_VERSION, lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"] if settings.DEBUG else ["https://mljresultscompiler.onrender.com"],
@@ -478,263 +227,24 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    @app.get("/health", tags=["health"])
+    @app.get("/health")
     async def health_check():
+        return {"status": "healthy", "version": settings.APP_VERSION}
 
-        try:
-            db = get_session_db()
-            stats = db.get_session_statistics()
-
-            bot_status = "disabled"
-            if settings.ENABLE_TELEGRAM_BOT:
-                if bot_thread and bot_thread.is_alive():
-                    bot_status = "running"
-                elif bot_initialized:
-                    bot_status = "starting"
-                else:
-                    bot_status = "dead"
-
-            cm_bot_status = "disabled"
-            if settings.MLJCM_BOT_TOKEN:
-                if cm_bot_thread and cm_bot_thread.is_alive():
-                    cm_bot_status = "running"
-                elif bot_initialized:
-                    cm_bot_status = "starting"
-                else:
-                    cm_bot_status = "dead"
-
-            overall = "healthy" if (bot_status in ("running", "disabled") and cm_bot_status in ("running", "disabled")) else "degraded"
-
-            return {
-                : overall,
-                : settings.APP_VERSION,
-                : settings.ENV,
-                : "ok",
-                : stats["total_sessions"],
-                : settings.ENABLE_AI_ASSISTANT,
-                : settings.ENABLE_TELEGRAM_BOT,
-                : bot_status,
-                : bool(settings.MLJCM_BOT_TOKEN),
-                : cm_bot_status,
-            }
-        except Exception as e:
-            logger.error(f"Health check failed: {e}")
-            return {
-                : "unhealthy",
-                : str(e),
-                : settings.APP_VERSION,
-            }, 503
-
-    @app.get("/ping", tags=["ping"])
+    @app.get("/ping")
     async def ping():
-
         return {"status": "pong"}
-
-    @app.get("/bot-health", tags=["health"])
-    async def bot_health():
-
-        bot_info = {
-            : {
-                : settings.ENABLE_TELEGRAM_BOT,
-                : bot_thread is not None and bot_thread.is_alive() if bot_thread else False,
-                : bot_initialized,
-                : bool(os.getenv("TELEGRAM_BOT_TOKEN")),
-            },
-            : {
-                : bool(settings.MLJCM_BOT_TOKEN),
-                : cm_bot_thread is not None and cm_bot_thread.is_alive() if cm_bot_thread else False,
-                : bool(settings.MLJCM_BOT_TOKEN),
-            }
-        }
-
-        if not settings.ENABLE_TELEGRAM_BOT:
-            bot_info["primary_bot"]["status"] = "disabled"
-        elif bot_thread and bot_thread.is_alive():
-            bot_info["primary_bot"]["status"] = "healthy"
-        elif bot_initialized:
-            bot_info["primary_bot"]["status"] = "starting"
-        else:
-            bot_info["primary_bot"]["status"] = "dead"
-            bot_info["primary_bot"]["action"] = "Bot thread has exited. Redeploy or restart to fix."
-
-        if not settings.MLJCM_BOT_TOKEN:
-            bot_info["mljcm_bot"]["status"] = "disabled"
-        elif cm_bot_thread and cm_bot_thread.is_alive():
-            bot_info["mljcm_bot"]["status"] = "healthy"
-        elif bot_initialized:
-            bot_info["mljcm_bot"]["status"] = "starting"
-        else:
-            bot_info["mljcm_bot"]["status"] = "dead"
-            bot_info["mljcm_bot"]["action"] = "Bot thread has exited. Redeploy or restart to fix."
-
-        return bot_info
-
-    @app.get("/liveness", tags=["health"])
-    async def liveness_check():
-
-        from datetime import datetime
-        checks = {}
-        all_healthy = True
-
-        try:
-            db = get_session_db()
-            stats = db.get_session_statistics()
-            checks["database"] = {"status": "ok", "sessions": stats["total_sessions"]}
-        except Exception as e:
-            checks["database"] = {"status": "error", "error": str(e)}
-            all_healthy = False
-
-        bot_threads = {}
-        if settings.ENABLE_TELEGRAM_BOT:
-            if bot_thread and bot_thread.is_alive():
-                bot_threads["primary"] = {"status": "running", "thread_alive": True}
-            else:
-                bot_threads["primary"] = {"status": "dead", "thread_alive": False}
-                all_healthy = False
-        else:
-            bot_threads["primary"] = {"status": "disabled"}
-
-        if settings.MLJCM_BOT_TOKEN:
-            if cm_bot_thread and cm_bot_thread.is_alive():
-                bot_threads["mljcm"] = {"status": "running", "thread_alive": True}
-            else:
-                bot_threads["mljcm"] = {"status": "dead", "thread_alive": False}
-                all_healthy = False
-        else:
-            bot_threads["mljcm"] = {"status": "disabled"}
-
-        checks["telegram_bots"] = bot_threads
-
-        try:
-            from src.async_ai_service import get_async_ai_service
-            ai_svc = get_async_ai_service()
-            checks["ai_service"] = {"status": "ok", "llm_available": ai_svc.ai is not None and ai_svc.ai.llm_enabled if ai_svc.ai else False}
-        except Exception as e:
-            checks["ai_service"] = {"status": "error", "error": str(e)}
-
-        try:
-            upload_dir = Path(settings.UPLOAD_DIR)
-            output_dir = Path(settings.OUTPUT_DIR)
-            checks["filesystem"] = {
-                : "ok",
-                : upload_dir.exists(),
-                : output_dir.exists(),
-            }
-        except Exception as e:
-            checks["filesystem"] = {"status": "error", "error": str(e)}
-            all_healthy = False
-
-        checks["config"] = {
-            : "ok",
-            : settings.ENV,
-            : settings.ENABLE_TELEGRAM_BOT,
-            : settings.ENABLE_AI_ASSISTANT,
-        }
-
-        return {
-            : "healthy" if all_healthy else "degraded",
-            : datetime.now().isoformat(),
-            : settings.APP_VERSION,
-            : checks,
-        }
-
-    @app.get("/status", tags=["status"])
-    async def status():
-
-        db = get_session_db()
-        stats = db.get_session_statistics()
-        settings = get_settings()
-
-        bot_status = "disabled"
-        if settings.ENABLE_TELEGRAM_BOT:
-            if bot_thread and bot_thread.is_alive():
-                bot_status = "running"
-            else:
-                bot_status = "dead"
-
-        cm_bot_status = "disabled"
-        if settings.MLJCM_BOT_TOKEN:
-            if cm_bot_thread and cm_bot_thread.is_alive():
-                cm_bot_status = "running"
-            else:
-                cm_bot_status = "dead"
-
-        return {
-            : settings.APP_NAME,
-            : settings.APP_VERSION,
-            : settings.ENV,
-            : {
-                : settings.DATABASE_URL,
-                : "ok",
-            },
-            : {
-                : stats["total_sessions"],
-                : stats["completed_sessions"],
-                : stats["total_sessions"] - stats["completed_sessions"],
-            },
-            : {
-                : stats["total_uploads"],
-                : stats["total_results"],
-                : stats["total_transformations"],
-            },
-            : {
-                : settings.ENABLE_AI_ASSISTANT,
-                : settings.ENABLE_TELEGRAM_BOT,
-                : bot_status,
-                : bool(settings.MLJCM_BOT_TOKEN),
-                : cm_bot_status,
-            },
-        }
-
-    @app.get("/logs", tags=["debug"])
-    async def get_logs(lines: int = 100):
-
-        log_paths = ['server.log', 'telegram_bot.log', 'nohup.out']
-        result = {}
-
-        for path in log_paths:
-            if os.path.exists(path):
-                try:
-                    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.readlines()
-                        result[path] = "".join(content[-lines:])
-                except Exception as e:
-                    result[path] = f"Error reading: {e}"
-
-        return {"logs": result if result else "No log files found in root directory."}
 
     try:
         from src.web_ui_clean import router as web_ui_router
         app.include_router(web_ui_router)
-        logger.info("✓ Registered web UI router")
-    except Exception as e:
-        logger.warning(f"Failed to load web UI router: {e}")
-
-    try:
-        from src.hybrid_bridge import router as hybrid_router
-        app.include_router(hybrid_router, prefix="/api")
-        logger.info("✓ Registered hybrid API router")
-    except Exception as e:
-        logger.warning(f"Failed to load hybrid router: {e}")
+    except: pass
 
     return app
 
 app = create_app()
 
-def main():
-
-    import uvicorn
-
-    settings = get_settings()
-
-    uvicorn.run(
-        app,
-        host=settings.SERVER_HOST,
-        port=settings.SERVER_PORT,
-        workers=1 if settings.DEBUG else settings.WORKERS,
-        reload=settings.RELOAD and settings.DEBUG,
-        log_level=settings.LOG_LEVEL.lower(),
-    )
-
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    settings = get_settings()
+    uvicorn.run(app, host=settings.SERVER_HOST, port=settings.SERVER_PORT)
