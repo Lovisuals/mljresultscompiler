@@ -61,14 +61,14 @@ class DataIntegrityValidator:
         self._validate_headers(consolidated_data)
 
         return {
-            "valid": len(self.errors) == 0,
-            "errors": self.errors,
-            "warnings": self.warnings,
-            "info": self.info,
-            "stats": {
-                "source_unique_emails": len(all_unique_emails),
-                "consolidated_emails": len(consolidated_emails),
-                "data_loss_percent": (1 - len(consolidated_emails) / len(all_unique_emails) * 100) if all_unique_emails else 0
+            : len(self.errors) == 0,
+            : self.errors,
+            : self.warnings,
+            : self.info,
+            : {
+                : len(all_unique_emails),
+                : len(consolidated_emails),
+                : (1 - len(consolidated_emails) / len(all_unique_emails) * 100) if all_unique_emails else 0
             }
         }
 
@@ -149,22 +149,22 @@ class DataIntegrityValidator:
                 self.info.append(f"✓ All {data_rows} rows have name and email")
 
             return {
-                "valid": len(self.errors) == 0,
-                "errors": self.errors,
-                "warnings": self.warnings,
-                "info": self.info,
-                "file_stats": {
-                    "headers": headers,
-                    "data_rows": data_rows,
-                    "total_columns": len(headers)
+                : len(self.errors) == 0,
+                : self.errors,
+                : self.warnings,
+                : self.info,
+                : {
+                    : headers,
+                    : data_rows,
+                    : len(headers)
                 }
             }
 
         except Exception as e:
             self.errors.append(f"❌ Failed to validate Excel file: {e}")
             return {
-                "valid": False,
-                "error": str(e)
+                : False,
+                : str(e)
             }
 
     def print_report(self, title: str = "Data Integrity Report"):

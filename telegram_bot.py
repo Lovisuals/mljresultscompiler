@@ -145,15 +145,15 @@ class TelegramBotHandler:
             except Exception as e:
                 logger.error(f"USER {user_id}: Error in conversational handling: {e}")
                 await update.message.reply_text(
-                    "I can help you consolidate test results! 📊\n\n"
-                    "Just upload your Excel test files and I'll process them."
+                    
+                    
                 )
         else:
 
             await update.message.reply_text(
-                "👋 I can help you consolidate test results!\n\n"
-                "📤 Send me your Excel test files (Test 1.xlsx, Test 2.xlsx, etc.)\n"
-                "Then use /consolidate to process them."
+                
+                
+                
             )
 
     def _generate_contextual_response(self, intent: str, intent_result: dict,
@@ -164,13 +164,13 @@ class TelegramBotHandler:
         if intent == 'test_consolidation':
             if doc_count == 0:
                 return (
-                    "📊 **Test Consolidation Mode**\n\n"
-                    "I'll help you consolidate test results!\n\n"
-                    "📤 Send me your Excel files:\n"
-                    "• Test 1.xlsx\n"
-                    "• Test 2.xlsx\n"
-                    "• Test 3.xlsx (and so on)\n\n"
-                    "I'll merge them by participant email."
+                    
+                    
+                    
+                    
+                    
+                    
+                    
                 )
             else:
                 return (
@@ -183,16 +183,16 @@ class TelegramBotHandler:
 
         elif intent == 'invoice_processing':
             return (
-                "💰 **Invoice Processing**\n\n"
-                "This feature is coming soon! Currently, I specialize in test result consolidation.\n\n"
-                "📤 Send me test Excel files to get started."
+                
+                
+                
             )
 
         elif intent == 'image_extraction':
             return (
-                "📸 **Image Text Extraction (OCR)**\n\n"
-                "This feature is coming soon! Currently, I work with Excel files.\n\n"
-                "📤 Send me test Excel files for consolidation."
+                
+                
+                
             )
 
         elif intent == 'table_merge' or intent == 'data_cleaning' or intent == 'report_generation':
@@ -210,17 +210,17 @@ class TelegramBotHandler:
                 response += "\n".join(suggestions)
             else:
                 response += (
-                    "I can help with:\n"
-                    "• Test result consolidation 📊\n"
-                    "• Merging Excel files by email\n"
-                    "• Creating color-coded reports\n\n"
-                    "Just upload your test files to get started!"
+                    
+                    
+                    
+                    
+                    
                 )
             return response
 
         return (
-            "I understand you want help with test consolidation! 📊\n\n"
-            "Send me your Excel test files and I'll merge them for you."
+            
+            
         )
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -228,16 +228,16 @@ class TelegramBotHandler:
         user_id = update.effective_user.id
 
         welcome_text = (
-            "✨ <b>MLJ Results Compiler</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "Welcome! I consolidate test results from multiple Excel files "
-            "into one clean, color-coded report — instantly.\n\n"
-            "📋 <b>How it works:</b>\n"
-            "1️⃣ Send me your <code>.xlsx</code> test files\n"
-            "2️⃣ I merge them by participant email\n"
-            "3️⃣ Download your consolidated results\n\n"
-            "📤 <b>Send your first file now to get started!</b>\n\n"
-            "💡 <i>Tip: Name your files Test 1.xlsx, Test 2.xlsx, etc. for best results</i>"
+            
+            
+            
+            
+            
+            
+            
+            
+            
+            
         )
 
         await update.message.reply_text(welcome_text, parse_mode="HTML")
@@ -247,25 +247,25 @@ class TelegramBotHandler:
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
         help_text = (
-            "📖 <b>MLJ Results Compiler — Help</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "<b>Commands:</b>\n"
-            "/start — Start fresh\n"
-            "/consolidate — Process uploaded files\n"
-            "/help — This help message\n"
-            "/cancel — Cancel current operation\n\n"
-            "<b>File Requirements:</b>\n"
-            "• Format: <code>.xlsx</code> (Excel)\n"
-            "• Required columns: Full Name, Email, Score\n"
-            "• Naming: Test 1.xlsx, Test 2.xlsx, etc.\n\n"
-            "<b>Output:</b>\n"
-            "📊 Color-coded Excel with:\n"
-            "• All test scores merged by participant\n"
-            "• Participation bonus calculated\n"
-            "• Final average &amp; Pass/Fail status\n\n"
-            "<b>Color Key:</b>\n"
-            "⬜ Test 1 · 🟦 Test 2 · 🟨 Test 3 · 🟩 Test 4 · 🟥 Test 5\n\n"
-            "📤 <b>Send your .xlsx files to get started!</b>"
+            
+            
+            
+            
+            
+            
+            
+            
+            
+            
+            
+            
+            
+            
+            
+            
+            
+            
+            
         )
 
         await update.effective_message.reply_text(help_text, parse_mode="HTML")
@@ -576,7 +576,7 @@ class TelegramBotHandler:
 
         if not uploaded_files:
             await query.edit_message_text(
-                "❌ No files found. Please upload files first with /start"
+                
             )
             return ConversationHandler.END
 
@@ -589,7 +589,7 @@ class TelegramBotHandler:
 
         try:
             await query.edit_message_text(
-                "⏳ Consolidating your files... please wait."
+                
             )
 
             input_dir = Path(session['temp_dir'])
@@ -623,7 +623,7 @@ class TelegramBotHandler:
                     logger.error(f"Files in {input_dir}: {[f.name for f in files_in_dir]}")
 
                 await query.edit_message_text(
-                    "❌ No valid test files found. Please check your files and try again."
+                    
                 )
                 session_manager.clear_session(user_id)
                 return ConversationHandler.END
@@ -648,7 +648,7 @@ class TelegramBotHandler:
                     logger.error(f"  Test {test_num}: {len(data)} participants")
 
                 await query.edit_message_text(
-                    "❌ Failed to consolidate results"
+                    
                 )
                 self.cleanup_session(user_id)
                 return ConversationHandler.END
@@ -766,7 +766,7 @@ class TelegramBotHandler:
 
             if not success or not output_file.exists():
                 await query.edit_message_text(
-                    "❌ Failed to generate the file. Please try again with /start."
+                    
                 )
                 self.cleanup_session(user_id)
                 return ConversationHandler.END
@@ -787,8 +787,8 @@ class TelegramBotHandler:
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=(
-                    "✅ <b>Report delivered!</b>\n"
-                    "━━━━━━━━━━━━━━━━━━\n\n"
+                    
+                    
                     f"👥 <b>{len(consolidated_data)}</b> participants\n"
                     f"📝 <b>{len(test_nums)}</b> tests merged ({', '.join(f'Test {t}' for t in sorted(test_nums))})\n"
                     f"📊 Format: Excel (color-coded)\n\n"
@@ -805,8 +805,8 @@ class TelegramBotHandler:
         except Exception as e:
             logger.error(f"Error generating file for user {user_id}: {str(e)}", exc_info=True)
             await query.edit_message_text(
-                "❌ Something went wrong generating your report.\n"
-                "Please try again with /start."
+                
+                
             )
             self.cleanup_session(user_id)
             return ConversationHandler.END
@@ -820,8 +820,8 @@ class TelegramBotHandler:
 
         if not uploaded_files:
             await update.message.reply_text(
-                "📁 No files uploaded yet.\n"
-                "Please send at least one test file to get started."
+                
+                
             )
             return SELECTING_FORMAT
 
@@ -833,8 +833,8 @@ class TelegramBotHandler:
         self.cleanup_session(user_id)
 
         await update.effective_message.reply_text(
-            "❌ Session cancelled.\n\n"
-            "Tap /start to begin a new session."
+            
+            
         )
         return ConversationHandler.END
 

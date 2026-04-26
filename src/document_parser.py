@@ -30,10 +30,10 @@ class StructuredDocument:
 class UniversalDocumentParser:
 
     SUPPORTED_FORMATS = {
-        'images': ['.jpg', '.png', '.jpeg', '.heic', '.bmp', '.tiff', '.gif'],
-        'documents': ['.pdf', '.docx', '.doc', '.txt', '.rtf'],
-        'spreadsheets': ['.xlsx', '.xls', '.csv', '.ods', '.tsv'],
-        'data': ['.json', '.xml', '.yaml', '.yml', '.html']
+        : ['.jpg', '.png', '.jpeg', '.heic', '.bmp', '.tiff', '.gif'],
+        : ['.pdf', '.docx', '.doc', '.txt', '.rtf'],
+        : ['.xlsx', '.xls', '.csv', '.ods', '.tsv'],
+        : ['.json', '.xml', '.yaml', '.yml', '.html']
     }
 
     def __init__(self):
@@ -50,11 +50,11 @@ class UniversalDocumentParser:
         if not path.exists():
             logger.error(f"File not found: {file_path}")
             return {
-                'type': 'unknown',
-                'format': '',
-                'mime': '',
-                'size': 0,
-                'exists': False
+                : 'unknown',
+                : '',
+                : '',
+                : 0,
+                : False
             }
 
         file_format = path.suffix.lower()
@@ -70,12 +70,12 @@ class UniversalDocumentParser:
                 break
 
         result = {
-            'type': file_type,
-            'format': file_format,
-            'mime': mime_type or 'application/octet-stream',
-            'size': file_size,
-            'exists': True,
-            'name': path.name
+            : file_type,
+            : file_format,
+            : mime_type or 'application/octet-stream',
+            : file_size,
+            : True,
+            : path.name
         }
 
         logger.info(f"Detected file: {path.name} ({file_type}, {file_format}, {file_size} bytes)")
@@ -150,9 +150,9 @@ class UniversalDocumentParser:
                 file_format=file_format,
                 metadata={
                     **file_info,
-                    'table_count': len(tables),
-                    'row_count': tables[0].shape[0] if tables else 0,
-                    'column_count': tables[0].shape[1] if tables else 0
+                    : len(tables),
+                    : tables[0].shape[0] if tables else 0,
+                    : tables[0].shape[1] if tables else 0
                 }
             )
         except Exception as e:
@@ -199,7 +199,7 @@ class UniversalDocumentParser:
                 file_format=file_format,
                 metadata={
                     **file_info,
-                    'text_length': len(raw_text)
+                    : len(raw_text)
                 }
             )
         except Exception as e:
@@ -224,7 +224,7 @@ class UniversalDocumentParser:
             file_format=file_format,
             metadata={
                 **file_info,
-                'ocr_available': False
+                : False
             }
         )
 
@@ -256,7 +256,7 @@ class UniversalDocumentParser:
                 file_format=file_format,
                 metadata={
                     **file_info,
-                    'has_structured_data': bool(extracted_data)
+                    : bool(extracted_data)
                 }
             )
         except Exception as e:
@@ -281,8 +281,8 @@ class UniversalDocumentParser:
                 file_format=file_info.get('format', ''),
                 metadata={
                     **file_info,
-                    'parsed_as': 'text',
-                    'text_length': len(raw_text)
+                    : 'text',
+                    : len(raw_text)
                 }
             )
         except Exception as e:

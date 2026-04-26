@@ -216,11 +216,11 @@ class RSSConnector(DataSourceConnector):
                     source_id=self.source.source_id,
                     record_id=f"{self.source.source_id}:{entry_idx}",
                     data={
-                        'title': entry.get('title', ''),
-                        'link': entry.get('link', ''),
-                        'summary': entry.get('summary', ''),
-                        'published': entry.get('published', ''),
-                        'author': entry.get('author', '')
+                        : entry.get('title', ''),
+                        : entry.get('link', ''),
+                        : entry.get('summary', ''),
+                        : entry.get('published', ''),
+                        : entry.get('author', '')
                     },
                     timestamp=datetime.now()
                 ))
@@ -251,9 +251,9 @@ class DataSourceManager:
     def _create_connector(self, source: DataSource) -> DataSourceConnector:
 
         connectors = {
-            'api': APIConnector,
-            'website': WebScraperConnector,
-            'rss': RSSConnector,
+            : APIConnector,
+            : WebScraperConnector,
+            : RSSConnector,
         }
 
         connector_class = connectors.get(source.source_type, APIConnector)

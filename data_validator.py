@@ -11,13 +11,13 @@ from datetime import datetime
 class TestDataValidator:
     def __init__(self):
         self.validation_report = {
-            'timestamp': datetime.now().isoformat(),
-            'pre_processing_checks': {},
-            'post_processing_checks': {},
-            'advanced_checks': {},
-            'issues_found': [],
-            'warnings': [],
-            'overall_status': 'PASS'
+            : datetime.now().isoformat(),
+            : {},
+            : {},
+            : {},
+            : [],
+            : [],
+            : 'PASS'
         }
 
     def validate_input_files(self, input_dir: str) -> Dict:
@@ -46,9 +46,9 @@ class TestDataValidator:
             try:
                 df = pd.read_excel(filepath, sheet_name='Responses')
                 report['files_found'].append({
-                    'file': file,
-                    'test': test_num,
-                    'rows': len(df)
+                    : file,
+                    : test_num,
+                    : len(df)
                 })
             except Exception as e:
                 self.validation_report['issues_found'].append(f"TEST_{test_num} load error: {e}")
@@ -152,10 +152,10 @@ class TestDataValidator:
     def _run_statistics(self, df: pd.DataFrame):
         test_cols = [c for c in df.columns if c.startswith('TEST_')]
         stats = {
-            'overall_pass_rate': round((df['STATUS'] == 'PASS').mean() * 100, 1),
-            'avg_score': round(df['SCORE'].mean(), 2),
-            'median_score': round(df['SCORE'].median(), 2),
-            'std_score': round(df['SCORE'].std(), 2)
+            : round((df['STATUS'] == 'PASS').mean() * 100, 1),
+            : round(df['SCORE'].mean(), 2),
+            : round(df['SCORE'].median(), 2),
+            : round(df['SCORE'].std(), 2)
         }
         for col in test_cols:
             stats[f'{col}_mean'] = round(df[col].mean(), 2)

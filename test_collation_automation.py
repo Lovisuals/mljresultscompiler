@@ -28,18 +28,18 @@ class TestResultsCollator:
         self.fuzzy_threshold = 82
 
         self.column_config = {
-            "name": [
-                "FULL NAME", "FULL NAMES", "NAMES", "NAME", "STUDENT NAME",
-                "PARTICIPANT NAME", "FULL NAME (REQUIRED)", "NAME OF STUDENT",
-                "CANDIDATE NAME", "STUDENT FULL NAME"
+            : [
+                , "FULL NAMES", "NAMES", "NAME", "STUDENT NAME",
+                , "FULL NAME (REQUIRED)", "NAME OF STUDENT",
+                , "STUDENT FULL NAME"
             ],
-            "email": [
-                "EMAIL", "EMAIL ADDRESS", "STUDENT EMAIL", "PARTICIPANT EMAIL",
-                "E-MAIL", "EMAIL ID"
+            : [
+                , "EMAIL ADDRESS", "STUDENT EMAIL", "PARTICIPANT EMAIL",
+                , "EMAIL ID"
             ],
-            "result": [
-                "RESULT", "SCORE", "MARK", "TEST SCORE", "PERCENTAGE", "MARKS",
-                "RESULT (%)", "SCORE (%)", "FINAL MARK"
+            : [
+                , "SCORE", "MARK", "TEST SCORE", "PERCENTAGE", "MARKS",
+                , "SCORE (%)", "FINAL MARK"
             ]
         }
 
@@ -53,12 +53,12 @@ class TestResultsCollator:
         }
 
         self.error_log = {
-            'errors': [], 'warnings': [], 'processed_files': [],
-            'timestamp': datetime.now().isoformat(),
-            'skipped_test1_count': 0,
-            'retakes_handled': 0,
-            'tests_found': [],
-            'column_mapping_issues': []
+            : [], 'warnings': [], 'processed_files': [],
+            : datetime.now().isoformat(),
+            : 0,
+            : 0,
+            : [],
+            : []
         }
 
     def _fuzzy_match_column(self, df_columns: List[str], candidates: List[str], field: str) -> Optional[str]:
@@ -121,8 +121,8 @@ class TestResultsCollator:
             required = ['Full Names', 'Email', 'Result']
             if any(r not in df.columns for r in required):
                 self.error_log['column_mapping_issues'].append({
-                    'file': os.path.basename(filepath),
-                    'missing': [r for r in required if r not in df.columns]
+                    : os.path.basename(filepath),
+                    : [r for r in required if r not in df.columns]
                 })
                 return pd.DataFrame()
 

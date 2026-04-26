@@ -35,14 +35,14 @@ class BatchItem:
 
     def to_dict(self):
         return {
-            'item_id': self.item_id,
-            'file_path': self.file_path,
-            'test_numbers': self.test_numbers,
-            'status': self.status.value,
-            'result_file': self.result_file,
-            'error': self.error,
-            'started_at': self.started_at,
-            'completed_at': self.completed_at
+            : self.item_id,
+            : self.file_path,
+            : self.test_numbers,
+            : self.status.value,
+            : self.result_file,
+            : self.error,
+            : self.started_at,
+            : self.completed_at
         }
 
 @dataclass
@@ -65,14 +65,14 @@ class BatchJob:
 
     def to_dict(self):
         return {
-            'batch_id': self.batch_id,
-            'user_id': self.user_id,
-            'status': self.status.value,
-            'items': [item.to_dict() for item in self.items],
-            'created_at': self.created_at,
-            'started_at': self.started_at,
-            'completed_at': self.completed_at,
-            'output_dir': self.output_dir
+            : self.batch_id,
+            : self.user_id,
+            : self.status.value,
+            : [item.to_dict() for item in self.items],
+            : self.created_at,
+            : self.started_at,
+            : self.completed_at,
+            : self.output_dir
         }
 
 class BatchProcessor:
@@ -165,17 +165,17 @@ class BatchProcessor:
         failed = sum(1 for item in batch.items if item.status == ItemStatus.FAILED)
 
         return {
-            'batch_id': batch_id,
-            'status': batch.status.value,
-            'total_items': total,
-            'completed': completed,
-            'successful': success,
-            'failed': failed,
-            'progress_percent': int((completed / total * 100) if total > 0 else 0),
-            'created_at': batch.created_at,
-            'started_at': batch.started_at,
-            'completed_at': batch.completed_at,
-            'output_dir': batch.output_dir
+            : batch_id,
+            : batch.status.value,
+            : total,
+            : completed,
+            : success,
+            : failed,
+            : int((completed / total * 100) if total > 0 else 0),
+            : batch.created_at,
+            : batch.started_at,
+            : batch.completed_at,
+            : batch.output_dir
         }
 
     def get_batch_report(self, batch_id: str) -> Dict:
@@ -184,14 +184,14 @@ class BatchProcessor:
         progress = self.get_batch_progress(batch_id)
 
         report = {
-            'summary': progress,
-            'items': [item.to_dict() for item in batch.items],
-            'statistics': {
-                'total_items': len(batch.items),
-                'successful_items': sum(1 for item in batch.items if item.status == ItemStatus.SUCCESS),
-                'failed_items': sum(1 for item in batch.items if item.status == ItemStatus.FAILED),
-                'pending_items': sum(1 for item in batch.items if item.status == ItemStatus.PENDING),
-                'success_rate': f"{progress['progress_percent']}%"
+            : progress,
+            : [item.to_dict() for item in batch.items],
+            : {
+                : len(batch.items),
+                : sum(1 for item in batch.items if item.status == ItemStatus.SUCCESS),
+                : sum(1 for item in batch.items if item.status == ItemStatus.FAILED),
+                : sum(1 for item in batch.items if item.status == ItemStatus.PENDING),
+                : f"{progress['progress_percent']}%"
             }
         }
 
@@ -232,8 +232,8 @@ class BatchProcessor:
 
         with open(log_file, 'a') as f:
             log_entry = {
-                'timestamp': datetime.now().isoformat(),
-                'batch': batch.to_dict()
+                : datetime.now().isoformat(),
+                : batch.to_dict()
             }
             f.write(json.dumps(log_entry) + '\n')
 
@@ -275,18 +275,18 @@ class BatchProcessor:
 
                 self.mark_item_success(batch_id, item_id, str(result_file))
                 results.append({
-                    'file': file_info['path'],
-                    'status': 'success',
-                    'output': str(result_file),
-                    'participants': len(consolidated)
+                    : file_info['path'],
+                    : 'success',
+                    : str(result_file),
+                    : len(consolidated)
                 })
 
             except Exception as e:
                 self.mark_item_failed(batch_id, item_id, str(e))
                 results.append({
-                    'file': file_info['path'],
-                    'status': 'failed',
-                    'error': str(e)
+                    : file_info['path'],
+                    : 'failed',
+                    : str(e)
                 })
 
         self.complete_batch(batch_id)
@@ -294,9 +294,9 @@ class BatchProcessor:
         report_file = self.export_batch_report(batch_id)
 
         return {
-            'batch_id': batch_id,
-            'output_dir': output_dir,
-            'results': results,
-            'report_file': report_file,
-            'progress': self.get_batch_progress(batch_id)
+            : batch_id,
+            : output_dir,
+            : results,
+            : report_file,
+            : self.get_batch_progress(batch_id)
         }

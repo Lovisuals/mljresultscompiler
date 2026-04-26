@@ -506,23 +506,23 @@ def create_app() -> FastAPI:
             overall = "healthy" if (bot_status in ("running", "disabled") and cm_bot_status in ("running", "disabled")) else "degraded"
 
             return {
-                "status": overall,
-                "version": settings.APP_VERSION,
-                "environment": settings.ENV,
-                "database": "ok",
-                "sessions_active": stats["total_sessions"],
-                "ai_enabled": settings.ENABLE_AI_ASSISTANT,
-                "bot_enabled": settings.ENABLE_TELEGRAM_BOT,
-                "bot_status": bot_status,
-                "cm_bot_enabled": bool(settings.MLJCM_BOT_TOKEN),
-                "cm_bot_status": cm_bot_status,
+                : overall,
+                : settings.APP_VERSION,
+                : settings.ENV,
+                : "ok",
+                : stats["total_sessions"],
+                : settings.ENABLE_AI_ASSISTANT,
+                : settings.ENABLE_TELEGRAM_BOT,
+                : bot_status,
+                : bool(settings.MLJCM_BOT_TOKEN),
+                : cm_bot_status,
             }
         except Exception as e:
             logger.error(f"Health check failed: {e}")
             return {
-                "status": "unhealthy",
-                "error": str(e),
-                "version": settings.APP_VERSION,
+                : "unhealthy",
+                : str(e),
+                : settings.APP_VERSION,
             }, 503
 
     @app.get("/ping", tags=["ping"])
@@ -534,16 +534,16 @@ def create_app() -> FastAPI:
     async def bot_health():
 
         bot_info = {
-            "primary_bot": {
-                "enabled": settings.ENABLE_TELEGRAM_BOT,
-                "thread_alive": bot_thread is not None and bot_thread.is_alive() if bot_thread else False,
-                "initialized": bot_initialized,
-                "token_configured": bool(os.getenv("TELEGRAM_BOT_TOKEN")),
+            : {
+                : settings.ENABLE_TELEGRAM_BOT,
+                : bot_thread is not None and bot_thread.is_alive() if bot_thread else False,
+                : bot_initialized,
+                : bool(os.getenv("TELEGRAM_BOT_TOKEN")),
             },
-            "mljcm_bot": {
-                "enabled": bool(settings.MLJCM_BOT_TOKEN),
-                "thread_alive": cm_bot_thread is not None and cm_bot_thread.is_alive() if cm_bot_thread else False,
-                "token_configured": bool(settings.MLJCM_BOT_TOKEN),
+            : {
+                : bool(settings.MLJCM_BOT_TOKEN),
+                : cm_bot_thread is not None and cm_bot_thread.is_alive() if cm_bot_thread else False,
+                : bool(settings.MLJCM_BOT_TOKEN),
             }
         }
 
@@ -616,26 +616,26 @@ def create_app() -> FastAPI:
             upload_dir = Path(settings.UPLOAD_DIR)
             output_dir = Path(settings.OUTPUT_DIR)
             checks["filesystem"] = {
-                "status": "ok",
-                "upload_dir_exists": upload_dir.exists(),
-                "output_dir_exists": output_dir.exists(),
+                : "ok",
+                : upload_dir.exists(),
+                : output_dir.exists(),
             }
         except Exception as e:
             checks["filesystem"] = {"status": "error", "error": str(e)}
             all_healthy = False
 
         checks["config"] = {
-            "status": "ok",
-            "env": settings.ENV,
-            "bot_enabled": settings.ENABLE_TELEGRAM_BOT,
-            "ai_enabled": settings.ENABLE_AI_ASSISTANT,
+            : "ok",
+            : settings.ENV,
+            : settings.ENABLE_TELEGRAM_BOT,
+            : settings.ENABLE_AI_ASSISTANT,
         }
 
         return {
-            "status": "healthy" if all_healthy else "degraded",
-            "timestamp": datetime.now().isoformat(),
-            "version": settings.APP_VERSION,
-            "checks": checks,
+            : "healthy" if all_healthy else "degraded",
+            : datetime.now().isoformat(),
+            : settings.APP_VERSION,
+            : checks,
         }
 
     @app.get("/status", tags=["status"])
@@ -660,29 +660,29 @@ def create_app() -> FastAPI:
                 cm_bot_status = "dead"
 
         return {
-            "app_name": settings.APP_NAME,
-            "version": settings.APP_VERSION,
-            "environment": settings.ENV,
-            "database": {
-                "url": settings.DATABASE_URL,
-                "status": "ok",
+            : settings.APP_NAME,
+            : settings.APP_VERSION,
+            : settings.ENV,
+            : {
+                : settings.DATABASE_URL,
+                : "ok",
             },
-            "sessions": {
-                "total": stats["total_sessions"],
-                "completed": stats["completed_sessions"],
-                "pending": stats["total_sessions"] - stats["completed_sessions"],
+            : {
+                : stats["total_sessions"],
+                : stats["completed_sessions"],
+                : stats["total_sessions"] - stats["completed_sessions"],
             },
-            "operations": {
-                "uploads": stats["total_uploads"],
-                "consolidations": stats["total_results"],
-                "transformations": stats["total_transformations"],
+            : {
+                : stats["total_uploads"],
+                : stats["total_results"],
+                : stats["total_transformations"],
             },
-            "features": {
-                "ai_assistant": settings.ENABLE_AI_ASSISTANT,
-                "telegram_bot": settings.ENABLE_TELEGRAM_BOT,
-                "telegram_bot_status": bot_status,
-                "cm_bot_enabled": bool(settings.MLJCM_BOT_TOKEN),
-                "cm_bot_status": cm_bot_status,
+            : {
+                : settings.ENABLE_AI_ASSISTANT,
+                : settings.ENABLE_TELEGRAM_BOT,
+                : bot_status,
+                : bool(settings.MLJCM_BOT_TOKEN),
+                : cm_bot_status,
             },
         }
 
