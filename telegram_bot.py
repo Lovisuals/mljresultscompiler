@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 MLJ Results Compiler Telegram Bot
-Fixed version - handles photo messages correctly
+Fixed version - Download button working properly
 """
 
 import os
@@ -33,15 +33,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
 load_dotenv()
 
 # Conversation states
 WAITING_FOR_FILES = 1
-CONFIRMING_PREVIEW = 2
-SELECTING_OUTPUT = 3
+PROCESSING_FILES = 2
 
-# Initialize session manager
 session_manager = SessionManager()
 
 
@@ -57,6 +54,7 @@ class ResultsBot:
         username = update.effective_user.username or "User"
 
         session_manager.get_session(user_id)
+        context.user_data.clear()  # Clear any old data
 
         welcome_text = (
             f"🤖 <b>MLJ Results Compiler</b>\n\n"
@@ -88,12 +86,11 @@ class ResultsBot:
             "<b>File naming examples:</b>\n"
             "• Test 1.xlsx\n"
             "• Test_2.xlsx\n"
-            "• 3.xlsx\n"
-            "• TEST_4_Results.xlsx\n\n"
+            "• 3.xlsx\n\n"
             "<b>Required columns in Excel:</b>\n"
-            "• Full Name (or Name, Student Name)\n"
-            "• Email (or Email Address)\n"
-            "• Result (or Score, Marks, %)\n\n"
+            "• Full Name (or Name)\n"
+            "• Email\n"
+            "• Result (or Score, %)\n\n"
             "<b>Output:</b>\n"
             "• Color-coded Excel file\n"
             "• Participation bonus included\n"
@@ -107,6 +104,7 @@ class ResultsBot:
         """Handle /cancel command"""
         user_id = update.effective_user.id
         self._cleanup_session(user_id)
+        context.user_data.clear()
 
         await update.message.reply_text(
             "❌ <b>Session cleared</b>\n\nUse /start to begin again.",
@@ -204,28 +202,35 @@ class ResultsBot:
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await update.message.reply_text(
+        message = await update.message.reply_text(
             f"📋 <b>Ready to consolidate</b>\n\n"
             f"Files: {', '.join(f'Test {n}' for n in sorted(uploaded.keys()))}\n\n"
             f"Proceed?",
             reply_markup=reply_markup,
             parse_mode="HTML"
         )
+        
+        # Store message ID for later reference
+        context.user_data['consolidate_message_id'] = message.message_id
+        
         return WAITING_FOR_FILES
 
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Handle button callbacks"""
         query = update.callback_query
         user_id = update.effective_user.id
+        callback_data = query.data
+        
         await query.answer()
 
-        if query.data == 'cancel':
+        if callback_data == 'cancel':
             await query.edit_message_text("❌ Cancelled. Use /start to begin again.")
             self._cleanup_session(user_id)
+            context.user_data.clear()
             return ConversationHandler.END
 
-        if query.data == 'consolidate':
-            # Send a new message instead of editing (avoids the photo editing bug)
+        if callback_data == 'consolidate':
+            # Show processing message
             await query.edit_message_text("⏳ <b>Processing files...</b>", parse_mode="HTML")
 
             try:
@@ -241,7 +246,7 @@ class ResultsBot:
                 if loaded == 0:
                     await query.edit_message_text(
                         "❌ <b>No valid test files found</b>\n\n"
-                        "Ensure files have 'Responses' sheet with 'Full Name', 'Email', 'Result' columns.",
+                        "Ensure files have 'Responses' sheet with required columns.",
                         parse_mode="HTML"
                     )
                     self._cleanup_session(user_id)
@@ -257,117 +262,109 @@ class ResultsBot:
                     self._cleanup_session(user_id)
                     return ConversationHandler.END
 
-                # Store for later
+                # Store data for download
                 context.user_data['consolidated'] = consolidated
                 context.user_data['processor'] = processor
                 context.user_data['output_dir'] = str(output_dir)
 
-                # Try to send preview image, fallback to text
-                preview_path = processor.generate_preview_image(consolidated, max_rows=10)
-
+                # Create download buttons
                 keyboard = [
-                    [InlineKeyboardButton("✅ Download Excel", callback_data='download')],
-                    [InlineKeyboardButton("❌ Cancel", callback_data='cancel')]
+                    [InlineKeyboardButton("📥 Download Excel", callback_data='download_xlsx')],
+                    [InlineKeyboardButton("❌ Cancel", callback_data='cancel_download')]
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
-                if preview_path and preview_path.exists():
-                    # Send photo as a NEW message, then delete the old "processing" message
-                    with open(preview_path, 'rb') as photo:
-                        await context.bot.send_photo(
-                            chat_id=update.effective_chat.id,
-                            photo=photo,
-                            caption=f"📊 <b>Preview</b>\n\n👥 {len(consolidated)} participants\n\nProceed?",
-                            reply_markup=reply_markup,
-                            parse_mode="HTML"
-                        )
-                    # Delete the "processing" message
-                    try:
-                        await query.message.delete()
-                    except:
-                        pass
-                else:
-                    # Fallback to text
-                    await query.edit_message_text(
-                        f"📊 <b>Preview</b>\n\n👥 {len(consolidated)} participants\n\nProceed?",
-                        reply_markup=reply_markup,
-                        parse_mode="HTML"
-                    )
+                # Update message with success and download option
+                await query.edit_message_text(
+                    f"✅ <b>Consolidation Complete!</b>\n\n"
+                    f"👥 <b>{len(consolidated)}</b> participants processed\n"
+                    f"📊 Tests: {', '.join(f'Test {t}' for t in sorted(processor.test_data.keys()))}\n\n"
+                    f"Click below to download your results:",
+                    reply_markup=reply_markup,
+                    parse_mode="HTML"
+                )
 
-                return CONFIRMING_PREVIEW
+                return WAITING_FOR_FILES  # Stay in waiting state for download button
 
             except Exception as e:
                 logger.error(f"Consolidation error: {e}")
-                await query.edit_message_text(f"❌ <b>Error</b>\n\n{str(e)[:300]}", parse_mode="HTML")
+                await query.edit_message_text(
+                    f"❌ <b>Error</b>\n\n{str(e)[:300]}", 
+                    parse_mode="HTML"
+                )
                 self._cleanup_session(user_id)
                 return ConversationHandler.END
 
-        return WAITING_FOR_FILES
-
-    async def download_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Handle download button"""
-        query = update.callback_query
-        user_id = update.effective_user.id
-        await query.answer()
-
-        if query.data == 'cancel':
-            await query.edit_message_text("❌ Cancelled. Use /start to begin again.")
-            self._cleanup_session(user_id)
-            return ConversationHandler.END
-
-        if query.data == 'download':
-            # Send new message instead of editing (avoids the bug)
-            await query.edit_message_text("⏳ <b>Generating your report...</b>", parse_mode="HTML")
+        if callback_data == 'download_xlsx':
+            # Generate and send the Excel file
+            await query.edit_message_text("⏳ <b>Generating your Excel report...</b>", parse_mode="HTML")
 
             try:
-                consolidated = context.user_data.get('consolidated', {})
+                consolidated = context.user_data.get('consolidated')
                 processor = context.user_data.get('processor')
                 output_dir = Path(context.user_data.get('output_dir', tempfile.gettempdir()))
 
                 if not consolidated or not processor:
-                    await query.edit_message_text("❌ Session expired. Use /start to begin again.")
+                    await query.edit_message_text(
+                        "❌ <b>Session expired</b>\n\nPlease use /start to begin again.",
+                        parse_mode="HTML"
+                    )
                     return ConversationHandler.END
 
                 output_file = output_dir / 'Consolidated_Results.xlsx'
                 success = processor.save_consolidated_file(consolidated, output_file.name)
 
                 if not success or not output_file.exists():
-                    await query.edit_message_text("❌ Failed to generate report.")
+                    await query.edit_message_text(
+                        "❌ <b>Failed to generate report</b>\n\nPlease try again.",
+                        parse_mode="HTML"
+                    )
                     return ConversationHandler.END
 
-                test_nums = set()
-                for data in consolidated.values():
-                    for key in data.keys():
-                        if key.startswith('test_') and key.endswith('_score'):
-                            test_nums.add(int(key.split('_')[1]))
-
+                # Send the file
                 with open(output_file, 'rb') as f:
                     await context.bot.send_document(
                         chat_id=update.effective_chat.id,
                         document=f,
-                        filename=f"Results_{len(consolidated)}_participants.xlsx",
-                        caption=f"✅ <b>Complete!</b>\n\n👥 {len(consolidated)} participants\n📝 {len(test_nums)} tests",
+                        filename=f"Consolidated_Results_{len(consolidated)}_participants.xlsx",
+                        caption=f"✅ <b>Your consolidated results are ready!</b>\n\n"
+                                f"👥 {len(consolidated)} participants\n\n"
+                                f"Use /start to begin a new session.",
                         parse_mode="HTML"
                     )
 
                 logger.info(f"User {user_id}: Downloaded results ({len(consolidated)} participants)")
 
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text="🔄 Use /start to begin a new session.",
-                    parse_mode="HTML"
-                )
+                # Delete the processing message
+                try:
+                    await query.message.delete()
+                except:
+                    pass
 
+                # Clean up
                 self._cleanup_session(user_id)
+                context.user_data.clear()
                 return ConversationHandler.END
 
             except Exception as e:
                 logger.error(f"Download error: {e}")
-                await query.edit_message_text(f"❌ <b>Error</b>\n\n{str(e)[:300]}", parse_mode="HTML")
+                await query.edit_message_text(
+                    f"❌ <b>Error generating file</b>\n\n{str(e)[:300]}",
+                    parse_mode="HTML"
+                )
                 self._cleanup_session(user_id)
                 return ConversationHandler.END
 
-        return ConversationHandler.END
+        if callback_data == 'cancel_download':
+            await query.edit_message_text(
+                "❌ <b>Cancelled</b>\n\nUse /start to begin a new session.",
+                parse_mode="HTML"
+            )
+            self._cleanup_session(user_id)
+            context.user_data.clear()
+            return ConversationHandler.END
+
+        return WAITING_FOR_FILES
 
     def _cleanup_session(self, user_id: int) -> None:
         try:
@@ -385,6 +382,7 @@ def build_application(token: str) -> Application:
     bot = ResultsBot(token)
     application = Application.builder().token(token).build()
 
+    # Single conversation handler
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("start", bot.cmd_start),
@@ -400,9 +398,6 @@ def build_application(token: str) -> Application:
                 MessageHandler(filters.Document.ALL, bot.handle_document),
                 CallbackQueryHandler(bot.button_callback),
             ],
-            CONFIRMING_PREVIEW: [
-                CallbackQueryHandler(bot.download_callback),
-            ],
         },
         fallbacks=[
             CommandHandler("cancel", bot.cmd_cancel),
@@ -415,6 +410,8 @@ def build_application(token: str) -> Application:
     application.add_handler(CommandHandler("help", bot.cmd_help))
     application.add_handler(CommandHandler("consolidate", bot.cmd_consolidate))
     application.add_handler(CommandHandler("cancel", bot.cmd_cancel))
+    
+    # Ignore all non-command text messages
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.ignore_message))
 
     return application
@@ -429,6 +426,7 @@ def main():
 
     application = build_application(token)
     logger.info("Starting MLJ Results Compiler Bot...")
+    logger.info("Bot is running. Press Ctrl+C to stop.")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
