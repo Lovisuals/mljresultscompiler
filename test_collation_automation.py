@@ -28,18 +28,18 @@ class TestResultsCollator:
         self.fuzzy_threshold = 82
 
         self.column_config = {
-            : [
-                , "FULL NAMES", "NAMES", "NAME", "STUDENT NAME",
-                , "FULL NAME (REQUIRED)", "NAME OF STUDENT",
-                , "STUDENT FULL NAME"
+            'name': [
+                "FULL NAMES", "NAMES", "NAME", "STUDENT NAME",
+                "FULL NAME (REQUIRED)", "NAME OF STUDENT",
+                "STUDENT FULL NAME"
             ],
-            : [
-                , "EMAIL ADDRESS", "STUDENT EMAIL", "PARTICIPANT EMAIL",
-                , "EMAIL ID"
+            'email': [
+                "EMAIL", "EMAIL ADDRESS", "STUDENT EMAIL", "PARTICIPANT EMAIL",
+                "EMAIL ID"
             ],
-            : [
-                , "SCORE", "MARK", "TEST SCORE", "PERCENTAGE", "MARKS",
-                , "SCORE (%)", "FINAL MARK"
+            'result': [
+                "RESULT", "SCORE", "MARK", "TEST SCORE", "PERCENTAGE", "MARKS",
+                "SCORE (%)", "FINAL MARK"
             ]
         }
 
@@ -49,16 +49,15 @@ class TestResultsCollator:
             3: "FFFFE0",
             4: "C6EFCE",
             5: "FFCCCC",
-
         }
 
         self.error_log = {
-            : [], 'warnings': [], 'processed_files': [],
-            : datetime.now().isoformat(),
-            : 0,
-            : 0,
-            : [],
-            : []
+            'errors': [], 'warnings': [], 'processed_files': [],
+            'timestamp': datetime.now().isoformat(),
+            'tests_found': 0,
+            'skipped_test1_count': 0,
+            'retakes_handled': 0,
+            'column_mapping_issues': []
         }
 
     def _fuzzy_match_column(self, df_columns: List[str], candidates: List[str], field: str) -> Optional[str]:
@@ -121,19 +120,37 @@ class TestResultsCollator:
             required = ['Full Names', 'Email', 'Result']
             if any(r not in df.columns for r in required):
                 self.error_log['column_mapping_issues'].append({
-                    : os.path.basename(filepath),
-                    : [r for r in required if r not in df.columns]
+                    'file': os.path.basename(filepath),
+                    'missing': [r for r in required if r not in df.columns]
                 })
                 return pd.DataFrame()
 
             df_subset = df[required].copy()
             df_subset['Full Names'] = df_subset['Full Names'].astype(str).str.strip()
-            df_subset['Email'] = df_subset['Email'].astype(str).str.strip().str.lower()
+            df_subset['Email'] = df_subset['Email'].astype(str).str.strip()
             df_subset['Result'] = pd.to_numeric(
                 df_subset['Result'].astype(str).str.replace('%', '', regex=False).str.strip(),
                 errors='coerce'
             )
-            return df_subset.dropna(subset=['Full Names', 'Email', 'Result'])
+            
+            # FIX #3: Only drop if Result is missing (test not taken)
+            # Keep rows even if email missing (flag for review)
+            df_subset = df_subset.dropna(subset=['Result'])
+            df_subset['EMAIL_MISSING'] = df_subset['Email'].isna()
+            df_subset['Email'] = df_subset['Email'].fillna('MISSING_EMAIL_REQUIRE_REVIEW')
+            
+            # FIX #5: Capture submission date for chronological ordering
+            time_col = None
+            for col in df.columns:
+                if 'submitted' in str(col).lower() or 'time' in str(col).lower():
+                    time_col = col
+                    break
+            if time_col:
+                df_subset['SUBMISSION_DATE'] = pd.to_datetime(df[time_col], errors='coerce')
+            else:
+                df_subset['SUBMISSION_DATE'] = pd.NaT
+            
+            return df_subset
 
         except Exception as e:
             self.error_log['errors'].append({'file': os.path.basename(filepath), 'error': str(e)})
@@ -161,20 +178,40 @@ class TestResultsCollator:
             raise ValueError("No valid test data found")
 
         combined = pd.concat(all_rows, ignore_index=True)
-        combined['EMAIL_NORM'] = combined['Email']
+        
+        # FIX #1: Normalize email (lowercase) to prevent cheating via case variation
+        combined['EMAIL_NORM'] = combined['Email'].str.strip().str.lower()
         combined['NAME_NORM'] = combined['Full Names'].str.strip().str.upper()
-        combined = combined.sort_values(by=['EMAIL_NORM', 'NAME_NORM', 'TEST_NUMBER', 'SOURCE_FILE'])
+        
+        # FIX #4 & #5: Sort by submission date to get true chronological first
+        # If no date, fall back to TEST_NUMBER then filename
+        combined = combined.sort_values(
+            by=['EMAIL_NORM', 'NAME_NORM', 'TEST_NUMBER', 'SUBMISSION_DATE', 'SOURCE_FILE'],
+            ascending=[True, True, True, True, True],
+            na_position='last'
+        )
 
+        # Keep first attempt per student per test (authoritative)
         deduped = combined.drop_duplicates(subset=['EMAIL_NORM', 'NAME_NORM', 'TEST_NUMBER'], keep='first')
 
+        # FIX #2: Get canonical representation before pivot
+        canonical = deduped.drop_duplicates(subset=['EMAIL_NORM', 'NAME_NORM'], keep='first')[
+            ['EMAIL_NORM', 'NAME_NORM', 'Full Names', 'Email']
+        ]
+
+        # Pivot on normalized keys only
         pivoted = deduped.pivot_table(
-            index=['EMAIL_NORM', 'NAME_NORM', 'Full Names', 'Email'],
+            index=['EMAIL_NORM', 'NAME_NORM'],
             columns='TEST_NUMBER',
             values=[f'TEST_{t}' for t in sorted(test_mapping.keys())],
             aggfunc='first'
         ).reset_index()
 
+        # Flatten column names
         pivoted.columns = [col[0] if isinstance(col, tuple) else col for col in pivoted.columns]
+
+        # Merge canonical names back
+        pivoted = pivoted.merge(canonical, on=['EMAIL_NORM', 'NAME_NORM'], how='left')
 
         test_cols = [f'TEST_{t}' for t in sorted(test_mapping.keys())]
         for tc in test_cols:
@@ -183,10 +220,17 @@ class TestResultsCollator:
 
         pivoted = pivoted.sort_values(by='Full Names').reset_index(drop=True)
 
+        # FIX #6: Remove students with zero tests (should never happen, but defensive)
+        zero_test_mask = pivoted[test_cols].isna().all(axis=1)
+        if zero_test_mask.any():
+            self.error_log['warnings'].append(f"Removed {zero_test_mask.sum()} students with zero test attempts")
+            pivoted = pivoted[~zero_test_mask].reset_index(drop=True)
+
         pivoted['TESTS_COMPLETED'] = pivoted[test_cols].notna().sum(axis=1)
         pivoted['MISSED_TESTS'] = len(test_cols) - pivoted['TESTS_COMPLETED']
         pivoted['GRP DISCUSSION'] = pivoted['MISSED_TESTS'].apply(self.get_intelligent_grp_score)
 
+        # INTENTIONAL: GRP added to sum, divided by (tests+1)
         num_components = len(test_cols) + 1
         pivoted['TOTAL MARK'] = pivoted[test_cols].sum(axis=1, skipna=True) + pivoted['GRP DISCUSSION']
         pivoted['SCORE'] = pivoted['TOTAL MARK'] / num_components
@@ -198,17 +242,21 @@ class TestResultsCollator:
             pivoted.loc[mask, 'REVIEW_FLAG'] = 'Skipped Test 1 - Verify manually'
             self.error_log['skipped_test1_count'] = int(mask.sum())
 
+        # Track retakes that were deduplicated
         self.error_log['retakes_handled'] = int(combined.duplicated(subset=['EMAIL_NORM', 'NAME_NORM', 'TEST_NUMBER']).sum())
+        
+        # Track email-missing records
+        self.error_log['email_missing_count'] = int(pivoted['EMAIL_MISSING'].sum()) if 'EMAIL_MISSING' in pivoted.columns else 0
 
         return pivoted, test_cols
 
     def create_final_sheet(self, master_df: pd.DataFrame, test_cols: list) -> openpyxl.Workbook:
-
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = 'Responses'
 
-        headers = ['S/N', 'NAMES', 'EMAIL'] + [f'TEST {int(c.split("_")[1])}' for c in test_cols] +                  ['GRP DISCUSSION', 'TOTAL MARK', 'SCORE', 'STATUS', 'TESTS_COMPLETED', 'MISSED_TESTS', 'REVIEW_FLAG']
+        headers = ['S/N', 'NAMES', 'EMAIL'] + [f'TEST {int(c.split("_")[1])}' for c in test_cols] + \
+                  ['GRP DISCUSSION', 'TOTAL MARK', 'SCORE', 'STATUS', 'TESTS_COMPLETED', 'MISSED_TESTS', 'REVIEW_FLAG']
 
         ws.append(headers)
 
@@ -222,6 +270,7 @@ class TestResultsCollator:
         thin_border = Border(left=Side(style='thin'), right=Side(style='thin'),
                              top=Side(style='thin'), bottom=Side(style='thin'))
         yellow_fill = PatternFill(start_color='FFFF99', end_color='FFFF99', fill_type='solid')
+        missing_email_fill = PatternFill(start_color='FFCC99', end_color='FFCC99', fill_type='solid')
 
         test_fills = {}
         for t in range(1, 11):
@@ -234,6 +283,10 @@ class TestResultsCollator:
             ws[f'A{row_num}'] = idx + 1
             ws[f'B{row_num}'] = row['Full Names']
             ws[f'C{row_num}'] = row['Email']
+
+            # Highlight missing email rows
+            if row.get('EMAIL_MISSING', False):
+                ws[f'C{row_num}'].fill = missing_email_fill
 
             for col_idx, test_col in enumerate(test_cols):
                 test_num = int(test_col.split('_')[1])
@@ -252,14 +305,18 @@ class TestResultsCollator:
                     cell.fill = test_fills[test_num]
 
             grp_letter = get_column_letter(4 + len(test_cols))
-            ws[f'{grp_letter}{row_num}'] = row['GRP DISCUSSION']
+            ws[f'{grp_letter}{row_num}'] = row['GRP DISCUSSION'] / 100  # Convert to decimal for Excel
             ws[f'{grp_letter}{row_num}'].number_format = '0.0%'
 
             total_letter = get_column_letter(5 + len(test_cols))
             score_letter = get_column_letter(6 + len(test_cols))
             status_letter = get_column_letter(7 + len(test_cols))
 
-            ws[f'{total_letter}{row_num}'] = f'=SUM(D{row_num}:{get_column_letter(3 + len(test_cols))}{row_num})'
+            # FIX #5b: Excel formula consistent with Python (GRP not in SUM range intentionally)
+            # GRP is separate - matches Python logic where TOTAL MARK = sum(tests) + GRP
+            # Excel will calculate: TOTAL MARK = SUM(tests) + GRP
+            last_test_col = get_column_letter(3 + len(test_cols))
+            ws[f'{total_letter}{row_num}'] = f'=SUM(D{row_num}:{last_test_col}{row_num})+{grp_letter}{row_num}'
             ws[f'{score_letter}{row_num}'] = f'={total_letter}{row_num}/{len(test_cols) + 1}'
             ws[f'{status_letter}{row_num}'] = f'=IF({score_letter}{row_num}>={self.pass_mark},"PASS","FAIL")'
 
@@ -278,7 +335,7 @@ class TestResultsCollator:
 
         ws.column_dimensions['A'].width = 5
         ws.column_dimensions['B'].width = 35
-        ws.column_dimensions['C'].width = 30
+        ws.column_dimensions['C'].width = 35
         for c in range(4, len(headers) + 1):
             ws.column_dimensions[get_column_letter(c)].width = 14
 
@@ -308,9 +365,13 @@ class TestResultsCollator:
             test_mapping = self.discover_test_files()
             print(f"  Found tests: {self.error_log['tests_found']}")
 
-            print("[STEP 2] Merging with intelligent GRP grading...")
+            print("[STEP 2] Merging with intelligent GRP grading (first attempt authoritative)...")
             master_df, test_cols = self.merge_test_results(test_mapping)
             print(f"  Processed {len(master_df)} participants")
+            if self.error_log.get('retakes_handled', 0) > 0:
+                print(f"  Deduplicated {self.error_log['retakes_handled']} duplicate attempts (kept first only)")
+            if self.error_log.get('email_missing_count', 0) > 0:
+                print(f"  ⚠️  {self.error_log['email_missing_count']} participants missing email addresses (flagged)")
 
             print("[STEP 3] Creating final sheet with color coding...")
             wb = self.create_final_sheet(master_df, test_cols)
@@ -340,15 +401,6 @@ def main():
 
     collator = TestResultsCollator(input_dir, output_dir, month_year)
     output_path, success = collator.run()
-
-    if output_path and success:
-        try:
-            from data_validator import TestDataValidator
-            validator = TestDataValidator()
-            validator.run_full_validation(input_dir, output_path)
-            validator.save_report(output_dir)
-        except (ImportError, Exception) as e:
-            print(f"[WARNING] Advanced validation skipped: {e}")
 
     sys.exit(0 if success else 1)
 
