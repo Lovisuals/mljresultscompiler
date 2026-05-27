@@ -21,6 +21,7 @@ class ExcelProcessor:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.test_data = {}
+        self.duplicate_warnings = []  # Track duplicates for logging
 
     NAME_PATTERNS = [
         'full name', 'fullname', 'name', 'participant', 'student',
@@ -93,6 +94,11 @@ class ExcelProcessor:
         return name_col, email_col, score_col
 
     def load_test_file(self, filepath: Path, test_number: int) -> bool:
+        """Load a test file and extract participant data.
+        
+        CRITICAL FIX #1: Keep FIRST occurrence of each email per test.
+        Subsequent duplicates are logged as warnings but ignored.
+        """
         try:
             wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
             ws = wb.active
@@ -115,7 +121,11 @@ class ExcelProcessor:
             m = re.search(r'\((\d+)\)', score_header)
             if m:
                 scale_max = float(m.group(1))
+            
+            # Initialize test data dict
             self.test_data[test_number] = {}
+            duplicate_count = 0
+            
             for row in ws.iter_rows(min_row=2, values_only=True):
                 full_name = clean_name(row[name_col - 1] if name_col <= len(row) else "")
                 email = clean_email(row[email_col - 1] if email_col and email_col <= len(row) else "")
@@ -126,7 +136,19 @@ class ExcelProcessor:
                     score = round((score / scale_max) * 100.0, 1)
                 is_valid, _ = validate_row_data(full_name, email, score)
                 if is_valid:
+                    # FIX #1: Keep first occurrence only (prevents overwriting)
+                    if email in self.test_data[test_number]:
+                        duplicate_count += 1
+                        logger.warning(
+                            f"Duplicate in {filepath.name}: {email} already has score "
+                            f"{self.test_data[test_number][email]['score']}, ignoring new score {score}"
+                        )
+                        continue
                     self.test_data[test_number][email] = {'name': full_name, 'score': score}
+            
+            if duplicate_count > 0:
+                logger.info(f"  {filepath.name}: Skipped {duplicate_count} duplicate entries (kept first only)")
+            
             return True
         except Exception as e:
             logger.error(f"Error loading {filepath.name}: {str(e)}")
@@ -138,7 +160,8 @@ class ExcelProcessor:
         test_nums = set()
         for f in all_xlsx_files:
             test_num = self._extract_test_number_from_file(f.name)
-            if test_num: test_nums.add(test_num)
+            if test_num: 
+                test_nums.add(test_num)
         for test_num in sorted(test_nums):
             matching_file = self._find_test_file(test_num)
             if matching_file and self.load_test_file(matching_file, test_num):
@@ -180,24 +203,66 @@ class ExcelProcessor:
         return report
 
     def consolidate_results(self) -> Dict:
-        if not self.test_data: return {}
+        """Consolidate results across all tests.
+        
+        CRITICAL FIX #2: Use email as primary key. NEVER merge by name alone.
+        Students with missing emails (@no-email.local) are keyed by normalized name.
+        """
+        if not self.test_data: 
+            return {}
+        
         available_tests = sorted(self.test_data.keys())
-        name_to_real_email = {}
-        for test_num in available_tests:
-            for email, data in self.test_data[test_num].items():
-                name_key = clean_name(data['name']).lower()
-                if not email.endswith('@no-email.local') and name_key not in name_to_real_email:
-                    name_to_real_email[name_key] = email
         consolidated = {}
+        email_name_tracker = {}  # Track name consistency per email
+        
         for test_num in available_tests:
             for email, data in self.test_data[test_num].items():
                 name = data['name']
-                name_key = clean_name(name).lower()
-                final_email = name_to_real_email.get(name_key, email)
-                if final_email not in consolidated:
-                    consolidated[final_email] = {'name': name}
-                    for t in available_tests: consolidated[final_email][f'test_{t}_score'] = None
-                consolidated[final_email][f'test_{test_num}_score'] = data['score']
+                score = data['score']
+                
+                # Determine the primary key for this student
+                is_placeholder = email.endswith('@no-email.local')
+                
+                if is_placeholder:
+                    # Missing email: use normalized name as key
+                    key = clean_name(name).lower()
+                    # Store the original name for display
+                    display_name = name
+                    display_email = None
+                else:
+                    # Valid email: use email as primary key
+                    key = email
+                    display_name = name
+                    display_email = email
+                    
+                    # Check name consistency for same email
+                    if key in email_name_tracker:
+                        if email_name_tracker[key].lower() != name.lower():
+                            logger.warning(
+                                f"Name mismatch for email {email}: "
+                                f"'{email_name_tracker[key]}' vs '{name}' (using first)"
+                            )
+                    else:
+                        email_name_tracker[key] = name
+                
+                # Initialize participant record if not exists
+                if key not in consolidated:
+                    consolidated[key] = {
+                        'name': display_name,
+                        'email': display_email,
+                        'is_placeholder': is_placeholder
+                    }
+                    for t in available_tests:
+                        consolidated[key][f'test_{t}_score'] = None
+                
+                # Store score (first occurrence per test already ensured in load_test_file)
+                consolidated[key][f'test_{test_num}_score'] = score
+        
+        # Clean up: Remove placeholder flag from output (internal only)
+        for key, data in consolidated.items():
+            data.pop('is_placeholder', None)
+        
+        # Sort by name for consistent output
         return dict(sorted(consolidated.items(), key=lambda x: x[1]['name'].lower()))
 
     def generate_preview_image(self, consolidated_data: Dict, max_rows: int = 12) -> Optional[Path]:
@@ -228,7 +293,9 @@ class ExcelProcessor:
                 draw.text((x + 5, y + 8), data['name'][:20], 'black', font=data_font)
                 x += col_width
                 draw.rectangle([(x, y), (x + col_width, y + row_height)], fill=row_color, outline='#DDDDDD')
-                draw.text((x + 5, y + 8), email[:18], '#666666', font=data_font)
+                # Show email or placeholder indicator
+                display_email = email if not email.endswith('@no-email.local') else '[No Email]'
+                draw.text((x + 5, y + 8), display_email[:18], '#666666', font=data_font)
                 x += col_width
                 for test_num in test_nums:
                     score = data.get(f'test_{test_num}_score')
@@ -263,7 +330,11 @@ class ExcelProcessor:
                 cell = ws.cell(row=1, column=col)
                 cell.font, cell.fill, cell.alignment = h_font, h_fill, h_align
             for email, data in consolidated_data.items():
-                ws.append([data['name'], email] + [data.get(f'test_{n}_score') for n in test_nums] + [data.get('Grade_6_bonus'), data.get('final_average'), data.get('status', 'N/A')])
+                # Use original email if available, otherwise the key (which may be name-based for placeholders)
+                display_email = data.get('email') if data.get('email') else email
+                if display_email.endswith('@no-email.local'):
+                    display_email = ''  # Leave blank for missing emails
+                ws.append([data['name'], display_email] + [data.get(f'test_{n}_score') for n in test_nums] + [data.get('Grade_6_bonus'), data.get('final_average'), data.get('status', 'N/A')])
             
             p_green = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
             p_yellow = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
@@ -279,24 +350,33 @@ class ExcelProcessor:
                     cell = ws.cell(row=r_idx, column=c_off + 3)
                     cell.fill, cell.alignment = get_fill_for_test(t_num), h_align
                 b_cell = ws.cell(row=r_idx, column=len(test_nums) + 3)
-                if data.get('Grade_6_bonus') is not None: b_cell.fill = p_green
+                if data.get('Grade_6_bonus') is not None: 
+                    b_cell.fill = p_green
                 b_cell.alignment = h_align
                 a_cell = ws.cell(row=r_idx, column=len(test_nums) + 4)
                 a_cell.fill = p_yellow if data.get('final_average', 0) >= 50 else p_red_light
                 a_cell.alignment = h_align
                 s_cell = ws.cell(row=r_idx, column=len(test_nums) + 5)
                 status = data.get('status', 'N/A')
-                if status == 'PASS': s_cell.fill, s_cell.font = p_pass, f_white
-                elif status == 'FAIL': s_cell.fill, s_cell.font = p_fail, f_white
+                if status == 'PASS': 
+                    s_cell.fill, s_cell.font = p_pass, f_white
+                elif status == 'FAIL': 
+                    s_cell.fill, s_cell.font = p_fail, f_white
                 s_cell.alignment = h_align
+            
             ws.column_dimensions['A'].width, ws.column_dimensions['B'].width = 25, 30
-            for c in range(3, len(headers) + 1): ws.column_dimensions[get_column_letter(c)].width = 15
+            for c in range(3, len(headers) + 1): 
+                ws.column_dimensions[get_column_letter(c)].width = 15
             output_path = self.output_dir / output_filename
             wb.save(output_path)
+            logger.info(f"Saved consolidated file: {output_path}")
             return True
         except Exception as e:
             logger.error(f"Save error: {e}")
             return False
 
-    def save_as_pdf(self, data, filename): return False
-    def save_as_docx(self, data, filename): return False
+    def save_as_pdf(self, data, filename): 
+        return False
+    
+    def save_as_docx(self, data, filename): 
+        return False
