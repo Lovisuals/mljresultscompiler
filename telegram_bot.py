@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 MLJ Results Compiler Telegram Bot
-Minimal version - only responds to commands, ignores random messages
+Fixed version - handles photo messages correctly
 """
 
 import os
@@ -46,7 +46,7 @@ session_manager = SessionManager()
 
 
 class ResultsBot:
-    """Minimal Telegram bot for test results consolidation"""
+    """Telegram bot for test results consolidation"""
 
     def __init__(self, token: str):
         self.token = token
@@ -56,7 +56,6 @@ class ResultsBot:
         user_id = update.effective_user.id
         username = update.effective_user.username or "User"
 
-        # Initialize session
         session_manager.get_session(user_id)
 
         welcome_text = (
@@ -102,11 +101,10 @@ class ResultsBot:
         )
 
         await update.message.reply_text(help_text, parse_mode="HTML")
-        logger.info(f"User {update.effective_user.id} requested help")
         return WAITING_FOR_FILES
 
     async def cmd_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Handle /cancel command - clear session"""
+        """Handle /cancel command"""
         user_id = update.effective_user.id
         self._cleanup_session(user_id)
 
@@ -124,108 +122,84 @@ class ResultsBot:
         try:
             document = update.message.document
 
-            # Validate file type
             if not document.file_name.lower().endswith('.xlsx'):
                 await update.message.reply_text(
-                    "❌ Only <code>.xlsx</code> files are supported.\n\n"
-                    "Please send an Excel file.",
+                    "❌ Only <code>.xlsx</code> files are supported.",
                     parse_mode="HTML"
                 )
                 return WAITING_FOR_FILES
 
-            # Get session
             session = session_manager.get_session(user_id)
             temp_dir = Path(session['temp_dir'])
             temp_dir.mkdir(parents=True, exist_ok=True)
 
-            # Download file
             file = await context.bot.get_file(document.file_id)
             file_path = temp_dir / document.file_name
             await file.download_to_drive(file_path)
 
-            # Extract test number
             test_num = self._extract_test_number(document.file_name)
 
             if test_num is None:
                 await update.message.reply_text(
                     "⚠️ <b>Could not detect test number</b>\n\n"
-                    "Please name your file with a number, e.g.:\n"
-                    "• <code>Test 1.xlsx</code>\n"
-                    "• <code>Test_2.xlsx</code>\n"
-                    "• <code>3.xlsx</code>",
+                    "Name your file with a number, e.g.: Test 1.xlsx",
                     parse_mode="HTML"
                 )
                 file_path.unlink()
                 return WAITING_FOR_FILES
 
-            # Check for duplicate test
             uploaded = session_manager.get_files_for_consolidation(user_id)
             if test_num in uploaded:
                 await update.message.reply_text(
-                    f"⚠️ <b>Test {test_num} already uploaded</b>\n\n"
-                    f"First file kept as authoritative. Duplicate ignored.",
+                    f"⚠️ <b>Test {test_num} already uploaded</b> - ignored.",
                     parse_mode="HTML"
                 )
                 file_path.unlink()
                 return WAITING_FOR_FILES
 
-            # Save file to session
             session_manager.add_file(user_id, str(file_path), test_num)
 
-            # Get updated file list
             uploaded = session_manager.get_files_for_consolidation(user_id)
             file_list = ', '.join(f'Test {n}' for n in sorted(uploaded.keys()))
 
             await update.message.reply_text(
                 f"✅ <b>Test {test_num} received!</b>\n\n"
                 f"📁 Files: {file_list}\n\n"
-                f"Send more files or type <code>/consolidate</code> when ready.",
+                f"Type <code>/consolidate</code> when ready.",
                 parse_mode="HTML"
             )
 
             return WAITING_FOR_FILES
 
         except Exception as e:
-            logger.error(f"Error handling document for user {user_id}: {e}")
-            await update.message.reply_text(
-                f"❌ Error: {str(e)[:200]}\n\nPlease try again."
-            )
+            logger.error(f"Error handling document: {e}")
+            await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
             return WAITING_FOR_FILES
 
     @staticmethod
     def _extract_test_number(filename: str) -> Optional[int]:
-        """Extract test number from filename"""
         import re
         name = filename.rsplit('.', 1)[0]
-        
-        # Pattern: Test X, Test_X, TestX
         match = re.search(r'[Tt]est\s*[_\-]?\s*(\d+)', name)
         if match:
             return int(match.group(1))
-        
-        # Pattern: Just a number
         match = re.search(r'(\d+)', name)
-        if match:
-            return int(match.group(1))
-        
-        return None
+        return int(match.group(1)) if match else None
 
     async def cmd_consolidate(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Handle /consolidate command"""
         user_id = update.effective_user.id
-
         uploaded = session_manager.get_files_for_consolidation(user_id)
 
         if not uploaded:
             await update.message.reply_text(
-                "⚠️ <b>No files uploaded</b>\n\n"
-                "Please send your test Excel files first, then use /consolidate.",
+                "⚠️ <b>No files uploaded</b>\n\nSend test files first.",
                 parse_mode="HTML"
             )
             return WAITING_FOR_FILES
 
         keyboard = [
-            [InlineKeyboardButton("📊 Consolidate to Excel", callback_data='consolidate')],
+            [InlineKeyboardButton("📊 Consolidate", callback_data='consolidate')],
             [InlineKeyboardButton("❌ Cancel", callback_data='cancel')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -237,7 +211,6 @@ class ResultsBot:
             reply_markup=reply_markup,
             parse_mode="HTML"
         )
-
         return WAITING_FOR_FILES
 
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -252,6 +225,7 @@ class ResultsBot:
             return ConversationHandler.END
 
         if query.data == 'consolidate':
+            # Send a new message instead of editing (avoids the photo editing bug)
             await query.edit_message_text("⏳ <b>Processing files...</b>", parse_mode="HTML")
 
             try:
@@ -261,20 +235,18 @@ class ResultsBot:
                 input_dir = Path(session['temp_dir'])
                 output_dir = Path(tempfile.mkdtemp())
 
-                # Process files
                 processor = ExcelProcessor(str(input_dir), str(output_dir))
                 loaded = processor.load_all_tests()
 
                 if loaded == 0:
                     await query.edit_message_text(
                         "❌ <b>No valid test files found</b>\n\n"
-                        "Please ensure files have a 'Responses' sheet with 'Full Name', 'Email', and 'Result' columns.",
+                        "Ensure files have 'Responses' sheet with 'Full Name', 'Email', 'Result' columns.",
                         parse_mode="HTML"
                     )
                     self._cleanup_session(user_id)
                     return ConversationHandler.END
 
-                # Consolidate
                 consolidated = processor.consolidate_results()
 
                 if not consolidated:
@@ -285,16 +257,13 @@ class ResultsBot:
                     self._cleanup_session(user_id)
                     return ConversationHandler.END
 
-                # Generate preview
-                preview_path = processor.generate_preview_image(consolidated, max_rows=10)
-
                 # Store for later
                 context.user_data['consolidated'] = consolidated
                 context.user_data['processor'] = processor
                 context.user_data['output_dir'] = str(output_dir)
 
-                # Send preview
-                caption = f"📊 <b>Preview</b>\n\n👥 {len(consolidated)} participants\n\nProceed to download?"
+                # Try to send preview image, fallback to text
+                preview_path = processor.generate_preview_image(consolidated, max_rows=10)
 
                 keyboard = [
                     [InlineKeyboardButton("✅ Download Excel", callback_data='download')],
@@ -303,18 +272,24 @@ class ResultsBot:
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
                 if preview_path and preview_path.exists():
+                    # Send photo as a NEW message, then delete the old "processing" message
                     with open(preview_path, 'rb') as photo:
                         await context.bot.send_photo(
                             chat_id=update.effective_chat.id,
                             photo=photo,
-                            caption=caption,
+                            caption=f"📊 <b>Preview</b>\n\n👥 {len(consolidated)} participants\n\nProceed?",
                             reply_markup=reply_markup,
                             parse_mode="HTML"
                         )
-                    await query.delete_message()
+                    # Delete the "processing" message
+                    try:
+                        await query.message.delete()
+                    except:
+                        pass
                 else:
+                    # Fallback to text
                     await query.edit_message_text(
-                        f"📊 <b>Consolidation Preview</b>\n\n👥 {len(consolidated)} participants\n\nProceed?",
+                        f"📊 <b>Preview</b>\n\n👥 {len(consolidated)} participants\n\nProceed?",
                         reply_markup=reply_markup,
                         parse_mode="HTML"
                     )
@@ -322,11 +297,8 @@ class ResultsBot:
                 return CONFIRMING_PREVIEW
 
             except Exception as e:
-                logger.error(f"Consolidation error for user {user_id}: {e}")
-                await query.edit_message_text(
-                    f"❌ <b>Error</b>\n\n{str(e)[:300]}\n\nPlease try again.",
-                    parse_mode="HTML"
-                )
+                logger.error(f"Consolidation error: {e}")
+                await query.edit_message_text(f"❌ <b>Error</b>\n\n{str(e)[:300]}", parse_mode="HTML")
                 self._cleanup_session(user_id)
                 return ConversationHandler.END
 
@@ -344,6 +316,7 @@ class ResultsBot:
             return ConversationHandler.END
 
         if query.data == 'download':
+            # Send new message instead of editing (avoids the bug)
             await query.edit_message_text("⏳ <b>Generating your report...</b>", parse_mode="HTML")
 
             try:
@@ -355,22 +328,19 @@ class ResultsBot:
                     await query.edit_message_text("❌ Session expired. Use /start to begin again.")
                     return ConversationHandler.END
 
-                # Save file
                 output_file = output_dir / 'Consolidated_Results.xlsx'
                 success = processor.save_consolidated_file(consolidated, output_file.name)
 
                 if not success or not output_file.exists():
-                    await query.edit_message_text("❌ Failed to generate report. Please try again.")
+                    await query.edit_message_text("❌ Failed to generate report.")
                     return ConversationHandler.END
 
-                # Get test numbers
                 test_nums = set()
                 for data in consolidated.values():
                     for key in data.keys():
                         if key.startswith('test_') and key.endswith('_score'):
                             test_nums.add(int(key.split('_')[1]))
 
-                # Send file
                 with open(output_file, 'rb') as f:
                     await context.bot.send_document(
                         chat_id=update.effective_chat.id,
@@ -392,26 +362,21 @@ class ResultsBot:
                 return ConversationHandler.END
 
             except Exception as e:
-                logger.error(f"Download error for user {user_id}: {e}")
-                await query.edit_message_text(
-                    f"❌ <b>Error generating report</b>\n\n{str(e)[:300]}",
-                    parse_mode="HTML"
-                )
+                logger.error(f"Download error: {e}")
+                await query.edit_message_text(f"❌ <b>Error</b>\n\n{str(e)[:300]}", parse_mode="HTML")
                 self._cleanup_session(user_id)
                 return ConversationHandler.END
 
         return ConversationHandler.END
 
     def _cleanup_session(self, user_id: int) -> None:
-        """Clean up user session"""
         try:
             session_manager.clear_session(user_id)
         except Exception as e:
-            logger.error(f"Cleanup error for user {user_id}: {e}")
+            logger.error(f"Cleanup error: {e}")
 
-    # This method is intentionally empty - NO RESPONSE TO RANDOM MESSAGES
     async def ignore_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Ignore all non-command messages - bot does NOT respond"""
+        """Ignore all non-command messages"""
         return
 
 
@@ -420,7 +385,6 @@ def build_application(token: str) -> Application:
     bot = ResultsBot(token)
     application = Application.builder().token(token).build()
 
-    # Conversation handler for file upload workflow
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("start", bot.cmd_start),
@@ -447,35 +411,24 @@ def build_application(token: str) -> Application:
     )
 
     application.add_handler(conv_handler)
-
-    # Standalone command handlers
     application.add_handler(CommandHandler("start", bot.cmd_start))
     application.add_handler(CommandHandler("help", bot.cmd_help))
     application.add_handler(CommandHandler("consolidate", bot.cmd_consolidate))
     application.add_handler(CommandHandler("cancel", bot.cmd_cancel))
-
-    # CRITICAL: This handler ignores ALL non-command messages (no response)
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, bot.ignore_message)
-    )
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.ignore_message))
 
     return application
 
 
 def main():
-    """Main entry point"""
     token = os.getenv('TELEGRAM_BOT_TOKEN')
 
     if not token:
-        logger.error("TELEGRAM_BOT_TOKEN not found in environment variables")
-        raise ValueError("Please set TELEGRAM_BOT_TOKEN in .env file")
+        logger.error("TELEGRAM_BOT_TOKEN not found")
+        raise ValueError("Please set TELEGRAM_BOT_TOKEN")
 
     application = build_application(token)
-
     logger.info("Starting MLJ Results Compiler Bot...")
-    logger.info("Bot will ONLY respond to commands: /start, /help, /consolidate, /cancel")
-    logger.info("Random text messages will be IGNORED")
-
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
