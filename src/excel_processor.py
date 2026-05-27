@@ -1,10 +1,11 @@
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 import openpyxl
-from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 import logging
 import re
+from difflib import SequenceMatcher
 
 from src.validators import clean_name, clean_email, parse_score, validate_row_data
 from src.color_config import get_fill_for_test, TEST_COLORS
@@ -21,7 +22,7 @@ class ExcelProcessor:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.test_data = {}
-        self.duplicate_warnings = []  # Track duplicates for logging
+        self.merge_log = []  # Track what was merged
 
     NAME_PATTERNS = [
         'full name', 'fullname', 'name', 'participant', 'student',
@@ -93,63 +94,124 @@ class ExcelProcessor:
             name_col = max(name_candidates, key=lambda x: x[1])[0]
         return name_col, email_col, score_col
 
+    def _normalize_name_for_matching(self, name: str) -> str:
+        """Normalize name for similarity matching"""
+        if not name:
+            return ""
+        # Remove punctuation, extra spaces, convert to lowercase
+        normalized = re.sub(r'[^\w\s]', '', name.lower())
+        # Remove common titles
+        normalized = re.sub(r'\b(mr|mrs|ms|dr|prof|rev)\b', '', normalized)
+        # Remove extra spaces
+        normalized = re.sub(r'\s+', ' ', normalized).strip()
+        return normalized
+
+    def _names_are_similar(self, name1: str, name2: str, threshold: float = 0.85) -> bool:
+        """Check if two names are similar enough to be the same person"""
+        if not name1 or not name2:
+            return False
+        n1 = self._normalize_name_for_matching(name1)
+        n2 = self._normalize_name_for_matching(name2)
+        
+        # Exact match after normalization
+        if n1 == n2:
+            return True
+        
+        # Fuzzy match
+        ratio = SequenceMatcher(None, n1, n2).ratio()
+        return ratio >= threshold
+
     def load_test_file(self, filepath: Path, test_number: int) -> bool:
         """Load a test file and extract participant data.
         
-        CRITICAL FIX #1: Keep FIRST occurrence of each email per test.
-        Subsequent duplicates are logged as warnings but ignored.
+        RULES:
+        1. Keep FIRST occurrence of each email per test (authoritative)
+        2. NEVER drop a valid score - every score must be captured
+        3. Create placeholder for missing emails
         """
         try:
             wb = openpyxl.load_workbook(filepath, data_only=True, read_only=True)
             ws = wb.active
             headers = self._get_all_headers(ws)
+            
             name_col = self.find_column_index(ws, self.NAME_PATTERNS)
             email_col = self.find_column_index(ws, self.EMAIL_PATTERNS)
+            
             score_col = self.find_column_index(ws, [
                 f'Test {test_number} Score', f'Test {test_number} Result',
                 f'Test {test_number}', f'test{test_number}',
-            ]) or self.find_column_index(ws, self.SCORE_PATTERNS + ['%'])
+                f'TEST_{test_number}', f'Score {test_number}'
+            ])
+            
+            if not score_col:
+                score_col = self.find_column_index(ws, self.SCORE_PATTERNS + ['%'])
+            
             if not all([name_col, score_col]) or not email_col:
                 sniffed_name, sniffed_email, sniffed_score = self._sniff_columns(ws)
                 name_col = name_col or sniffed_name
                 email_col = email_col or sniffed_email
                 score_col = score_col or sniffed_score
+            
             if not all([name_col, score_col]):
+                logger.error(f"Could not find required columns in {filepath.name}")
                 return False
+            
             score_header = str(headers.get(score_col, ''))
             scale_max = None
             m = re.search(r'\((\d+)\)', score_header)
             if m:
                 scale_max = float(m.group(1))
             
-            # Initialize test data dict
             self.test_data[test_number] = {}
             duplicate_count = 0
+            no_score_count = 0
+            rows_processed = 0
             
             for row in ws.iter_rows(min_row=2, values_only=True):
+                rows_processed += 1
+                
                 full_name = clean_name(row[name_col - 1] if name_col <= len(row) else "")
                 email = clean_email(row[email_col - 1] if email_col and email_col <= len(row) else "")
+                
+                # Create placeholder for missing email
                 if not email and full_name:
                     email = f"{re.sub(r'[^a-zA-Z0-9]', '', full_name.lower())}@no-email.local"
+                elif not email and not full_name:
+                    email = f"unknown_{rows_processed}@no-email.local"
+                
                 score = parse_score(row[score_col - 1] if score_col <= len(row) else None)
+                
                 if score is not None and scale_max and scale_max > 0 and score <= scale_max:
                     score = round((score / scale_max) * 100.0, 1)
-                is_valid, _ = validate_row_data(full_name, email, score)
-                if is_valid:
-                    # FIX #1: Keep first occurrence only (prevents overwriting)
-                    if email in self.test_data[test_number]:
-                        duplicate_count += 1
-                        logger.warning(
-                            f"Duplicate in {filepath.name}: {email} already has score "
-                            f"{self.test_data[test_number][email]['score']}, ignoring new score {score}"
-                        )
-                        continue
-                    self.test_data[test_number][email] = {'name': full_name, 'score': score}
+                
+                # Only skip if NO score
+                if score is None:
+                    no_score_count += 1
+                    continue
+                
+                if not full_name or len(full_name) < 2:
+                    logger.warning(f"{filepath.name}: Row has score {score} but no valid name")
+                    full_name = f"UNKNOWN_{test_number}_{rows_processed}"
+                
+                # Keep FIRST occurrence only
+                if email in self.test_data[test_number]:
+                    duplicate_count += 1
+                    logger.warning(
+                        f"Duplicate in {filepath.name}: {email} already has score "
+                        f"{self.test_data[test_number][email]['score']}, ignoring new score {score}"
+                    )
+                    continue
+                
+                self.test_data[test_number][email] = {'name': full_name, 'score': score}
             
             if duplicate_count > 0:
-                logger.info(f"  {filepath.name}: Skipped {duplicate_count} duplicate entries (kept first only)")
+                logger.info(f"  {filepath.name}: Skipped {duplicate_count} duplicates (kept first)")
+            if no_score_count > 0:
+                logger.info(f"  {filepath.name}: Skipped {no_score_count} rows with no score")
             
+            logger.info(f"  {filepath.name}: Loaded {len(self.test_data[test_number])} participants")
             return True
+            
         except Exception as e:
             logger.error(f"Error loading {filepath.name}: {str(e)}")
             return False
@@ -190,80 +252,132 @@ class ExcelProcessor:
         base_test = available_tests[0]
         for email, base_test_data in self.test_data[base_test].items():
             base_test_name = base_test_data['name']
-            scores_by_test = {base_test: base_test_data['score']}
             for test_num in available_tests:
                 if test_num == base_test: continue
                 if email not in self.test_data[test_num]:
                     report['missing_participants'].append({'email': email, 'name': base_test_name, 'missing_in_test': test_num})
                 else:
                     other_data = self.test_data[test_num][email]
-                    scores_by_test[test_num] = other_data['score']
                     if other_data['name'].lower() != base_test_name.lower():
                         report['name_mismatches'].append({'email': email, 'test_1_name': base_test_name, 'test_num': test_num, 'conflicting_name': other_data['name']})
         return report
 
     def consolidate_results(self) -> Dict:
-        """Consolidate results across all tests.
+        """Consolidate results with SMART MERGING.
         
-        CRITICAL FIX #2: Use email as primary key. NEVER merge by name alone.
-        Students with missing emails (@no-email.local) are keyed by normalized name.
+        MERGING RULES:
+        1. Same email (after normalization) → ALWAYS MERGE
+        2. Placeholder email (@no-email.local) + similar name → MERGE with real email if found
+        3. Very similar names (>90% match) + different emails → FLAG (don't merge, let reviewer decide)
+        4. Different names → Keep separate
         """
         if not self.test_data: 
             return {}
         
         available_tests = sorted(self.test_data.keys())
-        consolidated = {}
-        email_name_tracker = {}  # Track name consistency per email
+        
+        # Step 1: Build initial consolidation by email
+        email_based = {}
+        email_name_map = {}
         
         for test_num in available_tests:
             for email, data in self.test_data[test_num].items():
                 name = data['name']
                 score = data['score']
                 
-                # Determine the primary key for this student
-                is_placeholder = email.endswith('@no-email.local')
-                
-                if is_placeholder:
-                    # Missing email: use normalized name as key
-                    key = clean_name(name).lower()
-                    # Store the original name for display
-                    display_name = name
-                    display_email = None
-                else:
-                    # Valid email: use email as primary key
-                    key = email
-                    display_name = name
-                    display_email = email
-                    
-                    # Check name consistency for same email
-                    if key in email_name_tracker:
-                        if email_name_tracker[key].lower() != name.lower():
-                            logger.warning(
-                                f"Name mismatch for email {email}: "
-                                f"'{email_name_tracker[key]}' vs '{name}' (using first)"
-                            )
-                    else:
-                        email_name_tracker[key] = name
-                
-                # Initialize participant record if not exists
-                if key not in consolidated:
-                    consolidated[key] = {
-                        'name': display_name,
-                        'email': display_email,
-                        'is_placeholder': is_placeholder
+                if email not in email_based:
+                    email_based[email] = {
+                        'name': name,
+                        'email': email,
+                        'is_placeholder': email.endswith('@no-email.local')
                     }
                     for t in available_tests:
-                        consolidated[key][f'test_{t}_score'] = None
+                        email_based[email][f'test_{t}_score'] = None
+                    email_name_map[email] = name
                 
-                # Store score (first occurrence per test already ensured in load_test_file)
-                consolidated[key][f'test_{test_num}_score'] = score
+                # Store score (first occurrence per test)
+                if email_based[email][f'test_{test_num}_score'] is None:
+                    email_based[email][f'test_{test_num}_score'] = score
+                
+                # Update name if current is placeholder
+                if email_based[email]['is_placeholder'] and not email.endswith('@no-email.local'):
+                    email_based[email]['name'] = name
+                    email_based[email]['is_placeholder'] = False
         
-        # Clean up: Remove placeholder flag from output (internal only)
-        for key, data in consolidated.items():
+        # Step 2: Smart merging - merge placeholder emails with real emails by name
+        self.merge_log = []
+        merged = {}
+        
+        # First, add all non-placeholder emails
+        for email, data in email_based.items():
+            if not data['is_placeholder']:
+                merged[email] = data.copy()
+        
+        # Then process placeholders: try to match with existing real emails by name
+        for email, data in email_based.items():
+            if not data['is_placeholder']:
+                continue
+            
+            name = data['name']
+            matched = False
+            
+            # Try to find a real email with similar name
+            for real_email, real_data in merged.items():
+                if self._names_are_similar(name, real_data['name']):
+                    # Merge scores from placeholder into real record
+                    for t in available_tests:
+                        score_key = f'test_{t}_score'
+                        if data.get(score_key) is not None and merged[real_email].get(score_key) is None:
+                            merged[real_email][score_key] = data[score_key]
+                    self.merge_log.append({
+                        'placeholder': email,
+                        'merged_into': real_email,
+                        'name': name,
+                        'reason': 'similar_name'
+                    })
+                    matched = True
+                    break
+            
+            if not matched:
+                # No match found, keep as separate record
+                merged[email] = data.copy()
+        
+        # Step 3: Detect potential duplicates for flagging (similar names with different real emails)
+        name_to_keys = {}
+        for key, data in merged.items():
+            if not data.get('is_placeholder', False):
+                name_norm = self._normalize_name_for_matching(data['name'])
+                if name_norm not in name_to_keys:
+                    name_to_keys[name_norm] = []
+                name_to_keys[name_norm].append(key)
+        
+        # Flag potential duplicates
+        for key, data in merged.items():
+            name_norm = self._normalize_name_for_matching(data['name'])
+            similar_keys = name_to_keys.get(name_norm, [])
+            
+            if len(similar_keys) > 1:
+                data['DUPLICATE_FLAG'] = True
+                data['DUPLICATE_GROUP'] = name_norm
+            else:
+                data['DUPLICATE_FLAG'] = False
+        
+        # Clean up internal flags
+        for key, data in merged.items():
             data.pop('is_placeholder', None)
         
+        # Log merge results
+        if self.merge_log:
+            logger.info(f"  Smart merging: Merged {len(self.merge_log)} placeholder records into real emails")
+            for log in self.merge_log[:5]:
+                logger.info(f"    - {log['name']}: {log['placeholder']} → {log['merged_into']}")
+        
+        duplicate_count = sum(1 for d in merged.values() if d.get('DUPLICATE_FLAG', False))
+        if duplicate_count > 0:
+            logger.info(f"  ⚠️ {duplicate_count} potential duplicate records detected (will be flagged in output)")
+        
         # Sort by name for consistent output
-        return dict(sorted(consolidated.items(), key=lambda x: x[1]['name'].lower()))
+        return dict(sorted(merged.items(), key=lambda x: x[1]['name'].lower()))
 
     def generate_preview_image(self, consolidated_data: Dict, max_rows: int = 12) -> Optional[Path]:
         try:
@@ -289,11 +403,12 @@ class ExcelProcessor:
             for row_idx, (email, data) in enumerate(consolidated_data.items()):
                 if row_idx >= rows_to_show: break
                 x, row_color = 10, '#FFFFFF' if row_idx % 2 == 0 else '#F9F9F9'
+                if data.get('DUPLICATE_FLAG', False):
+                    row_color = '#FFDDAA'
                 draw.rectangle([(x, y), (x + col_width, y + row_height)], fill=row_color, outline='#DDDDDD')
                 draw.text((x + 5, y + 8), data['name'][:20], 'black', font=data_font)
                 x += col_width
                 draw.rectangle([(x, y), (x + col_width, y + row_height)], fill=row_color, outline='#DDDDDD')
-                # Show email or placeholder indicator
                 display_email = email if not email.endswith('@no-email.local') else '[No Email]'
                 draw.text((x + 5, y + 8), display_email[:18], '#666666', font=data_font)
                 x += col_width
@@ -318,58 +433,103 @@ class ExcelProcessor:
                 test_nums = sorted({int(k.split('_')[1]) for k in first if k.startswith('test_') and k.endswith('_score')})
                 if 'Grade_6_bonus' not in first:
                     consolidated_data = ParticipationBonusCalculator().apply_bonuses_to_consolidated(consolidated_data, test_nums)
+            
             wb = openpyxl.Workbook()
             ws = wb.active
             ws.title = "Results"
-            headers = ['Full Name', 'Email'] + [f'Test {n} Score' for n in test_nums] + ['Assignment Score', 'Final Average (%)', 'Status']
+            
+            headers = ['Full Name', 'Email'] + [f'Test {n} Score' for n in test_nums] + ['Assignment Score', 'Final Average (%)', 'Status', 'Review Flag']
             ws.append(headers)
+            
             h_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
             h_font = Font(bold=True, color="FFFFFF")
             h_align = Alignment(horizontal='center', vertical='center')
             for col in range(1, len(headers) + 1):
                 cell = ws.cell(row=1, column=col)
                 cell.font, cell.fill, cell.alignment = h_font, h_fill, h_align
-            for email, data in consolidated_data.items():
-                # Use original email if available, otherwise the key (which may be name-based for placeholders)
-                display_email = data.get('email') if data.get('email') else email
-                if display_email.endswith('@no-email.local'):
-                    display_email = ''  # Leave blank for missing emails
-                ws.append([data['name'], display_email] + [data.get(f'test_{n}_score') for n in test_nums] + [data.get('Grade_6_bonus'), data.get('final_average'), data.get('status', 'N/A')])
             
             p_green = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
             p_yellow = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
             p_red_light = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
             p_pass = PatternFill(start_color="70AD47", end_color="70AD47", fill_type="solid")
             p_fail = PatternFill(start_color="E74C3C", end_color="E74C3C", fill_type="solid")
+            p_duplicate = PatternFill(start_color="FF9900", end_color="FF9900", fill_type="solid")
+            p_merged = PatternFill(start_color="B4C6E7", end_color="B4C6E7", fill_type="solid")  # Light blue for merged
             f_white = Font(bold=True, color="FFFFFF")
-
-            for r_idx in range(2, len(consolidated_data) + 2):
-                email = list(consolidated_data.keys())[r_idx - 2]
-                data = consolidated_data[email]
+            thin_border = Border(left=Side(style='thin'), right=Side(style='thin'),
+                                 top=Side(style='thin'), bottom=Side(style='thin'))
+            
+            for r_idx, (email, data) in enumerate(consolidated_data.items(), start=2):
+                display_email = data.get('email') if data.get('email') else email
+                if display_email and display_email.endswith('@no-email.local'):
+                    display_email = ''
+                
+                # Determine review flag
+                review_flag = []
+                if data.get('DUPLICATE_FLAG', False):
+                    review_flag.append('POTENTIAL_DUPLICATE')
+                if display_email == '' and data.get('name'):
+                    review_flag.append('MISSING_EMAIL')
+                
+                row_data = [
+                    data['name'],
+                    display_email,
+                ] + [data.get(f'test_{n}_score') for n in test_nums] + [
+                    data.get('Grade_6_bonus'),
+                    data.get('final_average'),
+                    data.get('status', 'N/A'),
+                    ' | '.join(review_flag) if review_flag else ''
+                ]
+                ws.append(row_data)
+                
+                for col in range(1, len(headers) + 1):
+                    cell = ws.cell(row=r_idx, column=col)
+                    cell.border = thin_border
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                
                 for c_off, t_num in enumerate(test_nums):
                     cell = ws.cell(row=r_idx, column=c_off + 3)
-                    cell.fill, cell.alignment = get_fill_for_test(t_num), h_align
+                    cell.fill = get_fill_for_test(t_num)
+                
                 b_cell = ws.cell(row=r_idx, column=len(test_nums) + 3)
-                if data.get('Grade_6_bonus') is not None: 
+                if data.get('Grade_6_bonus') is not None:
                     b_cell.fill = p_green
-                b_cell.alignment = h_align
+                
                 a_cell = ws.cell(row=r_idx, column=len(test_nums) + 4)
-                a_cell.fill = p_yellow if data.get('final_average', 0) >= 50 else p_red_light
-                a_cell.alignment = h_align
+                avg = data.get('final_average', 0)
+                a_cell.fill = p_yellow if avg >= 50 else p_red_light
+                a_cell.number_format = '0.00'
+                
                 s_cell = ws.cell(row=r_idx, column=len(test_nums) + 5)
                 status = data.get('status', 'N/A')
-                if status == 'PASS': 
+                if status == 'PASS':
                     s_cell.fill, s_cell.font = p_pass, f_white
-                elif status == 'FAIL': 
+                elif status == 'FAIL':
                     s_cell.fill, s_cell.font = p_fail, f_white
-                s_cell.alignment = h_align
+                
+                # Highlight rows that need review
+                if data.get('DUPLICATE_FLAG', False):
+                    for col in range(1, len(headers) + 1):
+                        ws.cell(row=r_idx, column=col).fill = p_duplicate
             
-            ws.column_dimensions['A'].width, ws.column_dimensions['B'].width = 25, 30
-            for c in range(3, len(headers) + 1): 
-                ws.column_dimensions[get_column_letter(c)].width = 15
+            ws.column_dimensions['A'].width = 30
+            ws.column_dimensions['B'].width = 35
+            for c in range(3, len(headers) + 1):
+                ws.column_dimensions[get_column_letter(c)].width = 14
+            ws.column_dimensions[get_column_letter(len(headers))].width = 20
+            
+            ws.freeze_panes = 'A2'
+            
             output_path = self.output_dir / output_filename
             wb.save(output_path)
             logger.info(f"Saved consolidated file: {output_path}")
+            
+            duplicate_count = sum(1 for d in consolidated_data.values() if d.get('DUPLICATE_FLAG', False))
+            if duplicate_count > 0:
+                logger.info(f"  ⚠️ {duplicate_count} records marked for review (orange highlighted)")
+            if self.merge_log:
+                logger.info(f"  ✓ Merged {len(self.merge_log)} placeholder records automatically")
+            
             return True
         except Exception as e:
             logger.error(f"Save error: {e}")
